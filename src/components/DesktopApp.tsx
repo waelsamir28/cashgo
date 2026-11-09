@@ -521,7 +521,7 @@ export default function DesktopApp({ initialProducts, initialCustomers, initialI
           <span className="status-item">المستخدم: {userName}</span>
           <span className="status-item">{license?.activated ? "النسخة: كاملة ✔" : "النسخة: تجريبية"}</span>
           <span className="status-item grow" title={localDbPath || undefined}>
-            قاعدة بيانات SQLite محلية (algamal.db) متصلة — {settings.storeName}
+            قاعدة بيانات {localDbPath ? "SQLite محلية" : "PostgreSQL (Neon)"} متصلة — {settings.storeName}
             {localDbPath && <small style={{ color: "#607b9b", fontWeight: 600 }}> | {localDbPath}</small>}
           </span>
           <span className="status-item"><Save size={12} style={{ verticalAlign: "middle" }} /> الإصدار 3.0.0</span>

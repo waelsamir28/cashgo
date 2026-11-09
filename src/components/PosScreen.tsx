@@ -133,7 +133,9 @@ export default function PosScreen({ mode, products, customers, invoices, setting
   const [category, setCategory] = useState("الكل");
   const [quantity, setQuantity] = useState("1");
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
-  const [customerId, setCustomerId] = useState<number | "">("");
+  const [customerId, setCustomerId] = useState<number | "">(() =>
+    (customers.find((customer) => customer.name.includes("نقدي")) ?? customers[0])?.id ?? "",
+  );
   const [paymentType, setPaymentType] = useState("نقدي");
   const [discountText, setDiscountText] = useState("0");
   const [paidText, setPaidText] = useState("");
@@ -142,7 +144,7 @@ export default function PosScreen({ mode, products, customers, invoices, setting
   const [includeTax, setIncludeTax] = useState(false);
   const [autoPrint, setAutoPrint] = useState(false);
   const [showImage, setShowImage] = useState(true);
-  const [creditMode, setCreditMode] = useState(false);
+
   const [busy, setBusy] = useState(false);
   const [listOpen, setListOpen] = useState(false);
   const [viewInvoice, setViewInvoice] = useState<Invoice | null>(null);
@@ -191,11 +193,14 @@ export default function PosScreen({ mode, products, customers, invoices, setting
     });
   }, [products, catalogQuery, category]);
 
-  const subtotal = round(items.reduce((sum, item) => sum + item.quantity * item.price - item.discount, 0));
-  const discount = round(num(discountText));
-  const tax = includeTax ? round(subtotal * (num(settings.defaultTax) / 100)) : 0;
-  const total = round(subtotal - discount + tax);
-  const paid = creditMode ? 0 : paidText.trim() === "" ? total : round(num(paidText));
+  const subtotal = round(items.reduce((sum, item) => sum + item.quantity * item.price, 0));
+  const lineDiscount = round(items.reduce((sum, item) => sum + item.discount, 0));
+  const discount = round(Math.min(subtotal, lineDiscount + Math.max(0, num(discountText))));
+  const taxableAmount = Math.max(0, subtotal - discount);
+  const tax = includeTax ? round(taxableAmount * (num(settings.defaultTax) / 100)) : 0;
+  const total = round(taxableAmount + tax);
+  const deferredPayment = paymentType === "آجل" || paymentType === "قسط";
+  const paid = paidText.trim() === "" ? (deferredPayment ? 0 : total) : round(Math.min(total, Math.max(0, num(paidText))));
   const remaining = round(Math.max(0, total - paid));
 
   const fetchNextNumber = useCallback(async () => {
@@ -222,7 +227,6 @@ export default function PosScreen({ mode, products, customers, invoices, setting
     setPaidText("");
     setNotes("");
     setIncludeTax(false);
-    setCreditMode(false);
     setPaymentType("نقدي");
     void fetchNextNumber();
     setTimeout(() => barcodeRef.current?.focus(), 50);
@@ -256,13 +260,13 @@ export default function PosScreen({ mode, products, customers, invoices, setting
   }, [initialInvoiceId, onToast]);
 
   useEffect(() => {
-    void fetchNextNumber();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode]);
-
-  useEffect(() => {
-    if (!customerId && defaultCustomer) setCustomerId(defaultCustomer.id);
-  }, [defaultCustomer, customerId]);
+    const numberTimer = window.setTimeout(() => void fetchNextNumber(), 0);
+    const focusTimer = window.setTimeout(() => barcodeRef.current?.focus(), 80);
+    return () => {
+      window.clearTimeout(numberTimer);
+      window.clearTimeout(focusTimer);
+    };
+  }, [fetchNextNumber, mode]);
 
   const addProduct = useCallback((product: Product, qty = 1) => {
     const amount = Math.max(1, num(qty) || 1);
@@ -339,7 +343,14 @@ export default function PosScreen({ mode, products, customers, invoices, setting
   };
 
   const updateLine = (lineKey: string, patch: Partial<CartLine>) => {
-    setItems((current) => current.map((item) => (item.key === lineKey ? { ...item, ...patch } : item)));
+    setItems((current) => current.map((item) => {
+      if (item.key !== lineKey) return item;
+      const next = { ...item, ...patch };
+      next.quantity = Math.max(0, num(next.quantity));
+      next.price = Math.max(0, num(next.price));
+      next.discount = Math.min(Math.max(0, num(next.discount)), round(next.quantity * next.price));
+      return next;
+    }));
   };
 
   const doPrint = useCallback((sheet: SheetInvoice, balance?: number) => {
@@ -359,7 +370,7 @@ export default function PosScreen({ mode, products, customers, invoices, setting
     dateText: date,
     paymentType,
     status: remaining > 0 ? "آجل" : "محفوظة",
-    subtotal: round(subtotal - discount),
+    subtotal,
     discount,
     tax,
     total,
@@ -430,6 +441,7 @@ export default function PosScreen({ mode, products, customers, invoices, setting
       tax,
       paid,
       notes,
+      createdAt: date ? new Date(`${date}T12:00:00`).toISOString() : new Date().toISOString(),
       items: items.map((item) => ({
         productId: item.productId,
         productCode: item.productCode,
@@ -465,7 +477,7 @@ export default function PosScreen({ mode, products, customers, invoices, setting
     } finally {
       setBusy(false);
     }
-  }, [items, invoiceNo, mode, selectedCustomer, isSale, paymentType, discount, tax, paid, notes, onRefresh, onToast, fetchNextNumber, autoPrint, beep, buildCartSheet, doPrint, reviewInvoice]);
+  }, [items, invoiceNo, mode, selectedCustomer, isSale, paymentType, discount, tax, paid, notes, date, onRefresh, onToast, fetchNextNumber, autoPrint, beep, buildCartSheet, doPrint, reviewInvoice]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -512,6 +524,16 @@ export default function PosScreen({ mode, products, customers, invoices, setting
     if (target) void viewInvoiceById(target.id);
   };
 
+  const clearOrRemoveSelected = () => {
+    if (selectedProduct) {
+      setItems((current) => current.filter((item) => item.productId !== selectedProduct.id));
+      setSelectedProduct(null);
+      return;
+    }
+    if (!items.length) return;
+    if (window.confirm("هل تريد تفريغ كل الأصناف من الفاتورة الحالية؟")) setItems([]);
+  };
+
   return (
     <div className="pos-screen">
       {reviewInvoice && (
@@ -538,7 +560,7 @@ export default function PosScreen({ mode, products, customers, invoices, setting
         <button className="btn icon blue" title="ربط كاميرا الموبايل بالواي فاي (F7)" onClick={onPhoneScan}><Camera size={17} /></button>
         <button className="btn icon" title="استعلام سعر صنف (F6)" onClick={onPriceCheck}><PackageSearch size={17} /></button>
         <button className="btn icon" title="طباعة الفاتورة الحالية (F8)" onClick={handlePrintCart}><Printer size={17} /></button>
-        <button className="btn icon red" title="حذف الصنف المحدد أو تفريغ الفاتورة" onClick={() => selectedProduct ? setItems((current) => current.filter((item) => item.productId !== selectedProduct.id)) : setItems([])}>
+        <button className="btn icon red" title="حذف الصنف المحدد أو تفريغ الفاتورة" onClick={clearOrRemoveSelected}>
           <Trash2 size={16} />
         </button>
         <span className="toolbar-sep" />
@@ -589,7 +611,7 @@ export default function PosScreen({ mode, products, customers, invoices, setting
               <label className="label">طريقة الدفع</label>
               <CustomSelect
                 value={paymentType}
-                onChange={setPaymentType}
+                onChange={(value) => setPaymentType(value)}
                 options={[
                   { value: "نقدي", label: "نقدي CN" },
                   { value: "آجل", label: "آجل" },
@@ -617,7 +639,7 @@ export default function PosScreen({ mode, products, customers, invoices, setting
             <div className="qa qa-total"><small>الصافي</small><b>{fmt(total, 2)}</b></div>
           </div>
           <div className="toggle-grid">
-            <div className="toggle-item"><span>بيع آجل</span><button className={`switch ${creditMode ? "on" : ""}`} onClick={() => { setCreditMode(!creditMode); setPaymentType(creditMode ? "نقدي" : "آجل"); }} aria-label="أجل" /></div>
+            <div className="toggle-item"><span>بيع آجل</span><button type="button" className={`switch ${deferredPayment ? "on" : ""}`} onClick={() => setPaymentType(deferredPayment ? "نقدي" : "آجل")} aria-label="بيع آجل" aria-pressed={deferredPayment} /></div>
             <div className="toggle-item"><span>تطبيق الضريبة</span><button className={`switch ${includeTax ? "on" : ""}`} onClick={() => setIncludeTax(!includeTax)} aria-label="ضريبة" /></div>
             <div className="toggle-item"><span>صورة الصنف</span><button className={`switch ${showImage ? "on" : ""}`} onClick={() => setShowImage(!showImage)} aria-label="صورة الصنف" /></div>
             <div className="toggle-item"><span>طباعة تلقائية</span><button className={`switch ${autoPrint ? "on" : ""}`} onClick={() => setAutoPrint(!autoPrint)} aria-label="طباعة تلقائية" /></div>
@@ -666,7 +688,7 @@ export default function PosScreen({ mode, products, customers, invoices, setting
               <thead><tr><th>الكود</th><th>اسم الصنف</th><th>السعر</th><th>الكمية</th><th>الوحدة</th><th>الباركود</th></tr></thead>
               <tbody>
                 {filteredProducts.map((product) => (
-                  <tr key={product.id} className={selectedProduct?.id === product.id ? "selected" : product.quantity <= product.minQuantity ? "alert" : ""} onClick={() => addProduct(product, 1)} onDoubleClick={() => addProduct(product, num(quantity))}>
+                  <tr key={product.id} className={selectedProduct?.id === product.id ? "selected" : product.quantity <= product.minQuantity ? "alert" : ""} onClick={() => addProduct(product, num(quantity))}>
                     <td>{product.code}</td><td className="right">{product.name}</td>
                     <td>{fmt(isSale ? product.salePrice : product.purchasePrice, 2)}</td>
                     <td style={{ color: product.quantity <= product.minQuantity ? "#c00" : undefined }}>{fmt(product.quantity, 0)}</td>
@@ -721,11 +743,11 @@ export default function PosScreen({ mode, products, customers, invoices, setting
 
       <div className="pos-totals">
         <div className="total-cell grand-total">الإجمالي النهائي<b>{fmt(total)}</b></div>
-        <div className="total-cell">إجمالي الأصناف<b>{fmt(subtotal)}</b></div>
-        <div className="total-cell">الخصم<input value={discountText} onChange={(event) => setDiscountText(event.target.value)} /></div>
+        <div className="total-cell">قبل الخصومات<b>{fmt(subtotal)}</b></div>
+        <div className="total-cell">خصم إضافي<input inputMode="decimal" value={discountText} onChange={(event) => setDiscountText(event.target.value)} /><small>خصم الأصناف: {fmt(lineDiscount)}</small></div>
         <div className="total-cell">الضريبة<b>{fmt(tax)}</b></div>
-        <div className="total-cell">الصافي<b>{fmt(total)}</b></div>
-        <div className="total-cell">المدفوع<input value={creditMode ? "0" : paidText} onChange={(event) => setPaidText(event.target.value)} placeholder={fmt(total)} disabled={creditMode} /></div>
+        <div className="total-cell">صافي الفاتورة<b>{fmt(total)}</b></div>
+        <div className="total-cell">المدفوع<input inputMode="decimal" value={paidText} onChange={(event) => setPaidText(event.target.value)} placeholder={deferredPayment ? "0" : fmt(total)} /></div>
         <div className="total-cell">الباقي / الآجل<b>{fmt(remaining)}</b></div>
       </div>
 
