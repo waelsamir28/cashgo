@@ -12,7 +12,7 @@ const googleFonts = (
 
 export const metadata: Metadata = {
   title: "الجمال للأدوات المدرسية | نظام إدارة المكتبات والقرطاسية",
-  description: "نظام سطح مكتب عربي للأدوات المدرسية والمكتبية: مبيعات، مشتريات، مخازن، كشف حساب، معاينة فواتير، ثيمات وتصميم فواتير — جاهز للتحويل إلى ملف EXE.",
+  description: "نظام عربي لإدارة مبيعات ومشتريات ومخزون المكتبات والأدوات المدرسية، مع الفواتير والعملاء والتقارير والباركود.",
   icons: {
     icon: [
       { url: "/images/algamal-mark.svg", type: "image/svg+xml" },
@@ -23,7 +23,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  width: 1280,
+  width: "device-width",
   initialScale: 1,
 };
 
