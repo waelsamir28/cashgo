@@ -1,9 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // نحمّل better-sqlite3 وقت التشغيل عبر createRequire من مجلد التطبيق،
-  // فلا نحتاج externalization وقت البناء (الذي يولّد أسماء aliases لا تُحل داخل حزمة EXE).
-  serverExternalPackages: [],
+  // PostgreSQL pool requires the standard Node.js server runtime on Vercel.
+  serverExternalPackages: ["pg"],
 };
 
 export default nextConfig;

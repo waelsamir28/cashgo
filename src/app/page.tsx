@@ -13,11 +13,9 @@ export default async function HomePage() {
   let license: LicenseState | null = null;
 
   try {
-    productRows = listProducts() as unknown as Product[];
-    customerRows = listCustomers() as unknown as Customer[];
-    invoiceRows = listInvoices() as unknown as Invoice[];
-    settings = getSettings();
-    license = getLicense();
+    [productRows, customerRows, invoiceRows, settings, license] = await Promise.all([
+      listProducts(), listCustomers(), listInvoices(), getSettings(), getLicense(),
+    ]) as [Product[], Customer[], Invoice[], StoreSettings, LicenseState];
   } catch {
     // تبقى الواجهة قابلة للتحميل وتعيد المحاولة عبر الـ API إذا تعذر فتح الملف لحظياً.
   }

@@ -81,6 +81,36 @@ export const settings = pgTable("settings", {
   value: text("value").notNull().default(""),
 });
 
+export const users = pgTable("users", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  username: text("username").unique(),
+  password: text("password").notNull().default(""),
+  role: text("role").notNull().default("admin"),
+  phone: text("phone").notNull().default(""),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const license = pgTable("license", {
+  id: integer("id").primaryKey(),
+  installId: text("install_id").notNull(),
+  installedAt: timestamp("installed_at", { withTimezone: true }).notNull().defaultNow(),
+  activated: boolean("activated").notNull().default(false),
+  activatedAt: timestamp("activated_at", { withTimezone: true }),
+  trialDays: integer("trial_days").notNull().default(10),
+  trialProductLimit: integer("trial_product_limit").notNull().default(25),
+});
+
+export const scanQueue = pgTable("scan_queue", {
+  id: serial("id").primaryKey(),
+  code: text("code").notNull(),
+  source: text("source").notNull().default("phone"),
+  target: text("target").notNull().default("pos"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  consumed: boolean("consumed").notNull().default(false),
+});
+
 export const supportTickets = pgTable("support_tickets", {
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
