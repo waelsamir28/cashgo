@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="شعار الجمال للأدوات المدرسية">
+  <defs>
+    <linearGradient id="badge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2b86dc"/>
+      <stop offset="1" stop-color="#083b86"/>
+    </linearGradient>
+    <linearGradient id="swoosh" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f04444"/>
+      <stop offset="1" stop-color="#b30d0d"/>
+    </linearGradient>
+  </defs>
+  <!-- red dynamic swoosh -->
+  <path d="M4 45 C18 58 42 60 60 47 L60 55 C42 66 18 64 4 53 Z" fill="url(#swoosh)"/>
+  <path d="M8 12 C24 4 44 5 59 15 L59 20 C43 11 25 10 9 18 Z" fill="url(#swoosh)" opacity=".85"/>
+  <!-- rounded blue badge -->
+  <rect x="10" y="9" width="44" height="44" rx="11" fill="url(#badge)" stroke="#ffffff" stroke-width="2"/>
+  <!-- open notebook -->
+  <path d="M17 22 h13 c2 0 2 3 2 5 v15 h-13 c-2 0 -2 -3 -2 -5 z" fill="#ffffff"/>
+  <path d="M47 22 h-13 c-2 0 -2 3 -2 5 v15 h13 c2 0 2 -3 2 -5 z" fill="#eaf3ff"/>
+  <path d="M32 24 v20" stroke="#9fc0e2" stroke-width="1.6"/>
+  <path d="M20 28 h8 M20 32 h8 M20 36 h6 M36 28 h8 M36 32 h8 M36 36 h6" stroke="#a8c5e2" stroke-width="1.5" stroke-linecap="round"/>
+  <!-- yellow pencil -->
+  <g transform="rotate(-38 32 32)">
+    <rect x="29" y="14" width="7" height="30" rx="1.5" fill="#ffc531" stroke="#d99b09" stroke-width="1"/>
+    <path d="M29 44 h7 l-3.5 6 z" fill="#f4d9a8" stroke="#c9a86d" stroke-width="1"/>
+    <path d="M31 48 h3 l-1.5 2 z" fill="#26384f"/>
+    <rect x="29" y="14" width="7" height="5" rx="1.5" fill="#ef7c7c"/>
+  </g>
+  <!-- star -->
+  <path d="M53 6 l1.6 3.4 3.7.5 -2.7 2.6.7 3.7 -3.3-1.8 -3.3 1.8.7-3.7 -2.7-2.6 3.7-.5 z" fill="#ffd75e"/>
+</svg>

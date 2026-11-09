@@ -1,0 +1,57 @@
+// بيانات البذرة المشتركة — تُستخدم عند أول تشغيل لقاعدة SQLite المحلية
+
+export const productSeed = [
+  { code: "1001", barcode: "6223002001001", name: "كراسة مسطرة 100 ورقة", category: "كراسات وكشاكيل", unit: "كراسة", purchasePrice: 12, salePrice: 18, quantity: 240, minQuantity: 30 },
+  { code: "1002", barcode: "6223002001002", name: "كراسة مربعات 60 ورقة", category: "كراسات وكشاكيل", unit: "كراسة", purchasePrice: 8, salePrice: 12, quantity: 300, minQuantity: 40 },
+  { code: "1003", barcode: "6223002001003", name: "دفتر ملاحظات A5 غلاف مقوى", category: "كراسات وكشاكيل", unit: "دفتر", purchasePrice: 22, salePrice: 32, quantity: 110, minQuantity: 15 },
+  { code: "1004", barcode: "6223002001004", name: "ورق تصوير A4 أبيض 500 ورقة", category: "كراسات وكشاكيل", unit: "رزمة", purchasePrice: 95, salePrice: 125, quantity: 65, minQuantity: 10 },
+  { code: "1005", barcode: "6223002001005", name: "ورق ملون 20 لون", category: "كراسات وكشاكيل", unit: "حزمة", purchasePrice: 28, salePrice: 40, quantity: 90, minQuantity: 12 },
+  { code: "1035", barcode: "6223002001035", name: "كشكول A4 مسطر 192 ورقة", category: "كراسات وكشاكيل", unit: "كشكول", purchasePrice: 18, salePrice: 28, quantity: 130, minQuantity: 20 },
+  { code: "1036", barcode: "6223002001036", name: "كشكول رسم 100 ورقة", category: "كراسات وكشاكيل", unit: "كشكول", purchasePrice: 22, salePrice: 32, quantity: 95, minQuantity: 15 },
+  { code: "1037", barcode: "6223002001037", name: "كراسة طباعة 200 ورقة", category: "كراسات وكشاكيل", unit: "كراسة", purchasePrice: 14, salePrice: 22, quantity: 160, minQuantity: 20 },
+  { code: "1038", barcode: "6223002001038", name: "كراسة ملاحظات جيب A4", category: "كراسات وكشاكيل", unit: "كراسة", purchasePrice: 16, salePrice: 25, quantity: 120, minQuantity: 20 },
+  { code: "1039", barcode: "6223002001039", name: "كراسة تلوين 80 ورقة", category: "كراسات وكشاكيل", unit: "كراسة", purchasePrice: 20, salePrice: 30, quantity: 85, minQuantity: 12 },
+  { code: "1040", barcode: "6223002001040", name: "كشكول شفاف بجيب", category: "كراسات وكشاكيل", unit: "كشكول", purchasePrice: 12, salePrice: 20, quantity: 110, minQuantity: 15 },
+  { code: "1029", barcode: "6223002001029", name: "سلاح التلميذ – اللغة العربية", category: "كتب خارجية", unit: "كتاب", purchasePrice: 75, salePrice: 110, quantity: 45, minQuantity: 8 },
+  { code: "1030", barcode: "6223002001030", name: "سلاح التلميذ – الرياضيات", category: "كتب خارجية", unit: "كتاب", purchasePrice: 48, salePrice: 70, quantity: 55, minQuantity: 8 },
+  { code: "1031", barcode: "6223002001031", name: "كتاب الأضواء – العلوم", category: "كتب خارجية", unit: "كتاب", purchasePrice: 60, salePrice: 85, quantity: 40, minQuantity: 8 },
+  { code: "1032", barcode: "6223002001032", name: "كتاب الامتحان – اللغة العربية", category: "كتب خارجية", unit: "كتاب", purchasePrice: 95, salePrice: 140, quantity: 50, minQuantity: 8 },
+  { code: "1033", barcode: "6223002001033", name: "كتاب الامتحان – العلوم", category: "كتب خارجية", unit: "كتاب", purchasePrice: 95, salePrice: 140, quantity: 48, minQuantity: 8 },
+  { code: "1034", barcode: "6223002001034", name: "كتاب الامتحان – الدراسات", category: "كتب خارجية", unit: "كتاب", purchasePrice: 85, salePrice: 120, quantity: 42, minQuantity: 8 },
+  { code: "1006", barcode: "6223002001006", name: "قلم رصاص HB عبوة 12", category: "أقلام", unit: "علبة", purchasePrice: 30, salePrice: 42, quantity: 150, minQuantity: 20 },
+  { code: "1007", barcode: "6223002001007", name: "قلم حبر أزرق عبوة 10", category: "أقلام", unit: "علبة", purchasePrice: 35, salePrice: 50, quantity: 160, minQuantity: 20 },
+  { code: "1008", barcode: "6223002001008", name: "قلم حبر أحمر عبوة 10", category: "أقلام", unit: "علبة", purchasePrice: 35, salePrice: 50, quantity: 120, minQuantity: 20 },
+  { code: "1009", barcode: "6223002001009", name: "قلم جاف أسود", category: "أقلام", unit: "قطعة", purchasePrice: 5, salePrice: 8, quantity: 400, minQuantity: 50 },
+  { code: "1010", barcode: "6223002001010", name: "قلم ماركر سبورة بيضاء", category: "أقلام", unit: "قطعة", purchasePrice: 14, salePrice: 22, quantity: 8, minQuantity: 15 },
+  { code: "1011", barcode: "6223002001011", name: "ممحاة بيضاء كبيرة", category: "أدوات مدرسية", unit: "قطعة", purchasePrice: 3, salePrice: 5, quantity: 350, minQuantity: 40 },
+  { code: "1012", barcode: "6223002001012", name: "مبراة معدنية بعلبة", category: "أدوات مدرسية", unit: "قطعة", purchasePrice: 6, salePrice: 10, quantity: 220, minQuantity: 30 },
+  { code: "1013", barcode: "6223002001013", name: "مسطرة بلاستيك 30 سم", category: "أدوات هندسية", unit: "قطعة", purchasePrice: 7, salePrice: 12, quantity: 180, minQuantity: 25 },
+  { code: "1014", barcode: "6223002001014", name: "مجموعة أدوات هندسية 4 قطع", category: "أدوات هندسية", unit: "علبة", purchasePrice: 38, salePrice: 55, quantity: 75, minQuantity: 10 },
+  { code: "1015", barcode: "6223002001015", name: "منقلة 180 درجة", category: "أدوات هندسية", unit: "قطعة", purchasePrice: 5, salePrice: 9, quantity: 130, minQuantity: 20 },
+  { code: "1016", barcode: "6223002001016", name: "ألوان خشب 12 لون", category: "ألوان ورسم", unit: "علبة", purchasePrice: 32, salePrice: 48, quantity: 95, minQuantity: 12 },
+  { code: "1017", barcode: "6223002001017", name: "ألوان مائية 12 لون مع فرشاة", category: "ألوان ورسم", unit: "علبة", purchasePrice: 45, salePrice: 65, quantity: 60, minQuantity: 10 },
+  { code: "1018", barcode: "6223002001018", name: "أقلام فلوماستر 24 لون", category: "ألوان ورسم", unit: "علبة", purchasePrice: 75, salePrice: 105, quantity: 4, minQuantity: 10 },
+  { code: "1019", barcode: "6223002001019", name: "فرشاة رسم عريضة", category: "ألوان ورسم", unit: "قطعة", purchasePrice: 9, salePrice: 15, quantity: 100, minQuantity: 15 },
+  { code: "1020", barcode: "6223002001020", name: "لاصق سائل 50 مل", category: "قرطاسية مكتبية", unit: "عبوة", purchasePrice: 11, salePrice: 17, quantity: 140, minQuantity: 20 },
+  { code: "1021", barcode: "6223002001021", name: "شريط لاصق شفاف كبير", category: "قرطاسية مكتبية", unit: "لفافة", purchasePrice: 8, salePrice: 13, quantity: 170, minQuantity: 25 },
+  { code: "1022", barcode: "6223002001022", name: "مقص مكتبي صغير", category: "قرطاسية مكتبية", unit: "قطعة", purchasePrice: 18, salePrice: 27, quantity: 85, minQuantity: 12 },
+  { code: "1023", barcode: "6223002001023", name: "دباسة مكتبية مع دبابيس", category: "قرطاسية مكتبية", unit: "قطعة", purchasePrice: 42, salePrice: 60, quantity: 55, minQuantity: 8 },
+  { code: "1024", barcode: "6223002001024", name: "ملف بلاستيك شفاف A4", category: "قرطاسية مكتبية", unit: "قطعة", purchasePrice: 3, salePrice: 5, quantity: 500, minQuantity: 60 },
+  { code: "1025", barcode: "6223002001025", name: "حافظة أقلام قماشية", category: "حقائب وإكسسوارات", unit: "قطعة", purchasePrice: 25, salePrice: 38, quantity: 90, minQuantity: 12 },
+  { code: "1026", barcode: "6223002001026", name: "شنطة مدرسية قماش", category: "حقائب وإكسسوارات", unit: "قطعة", purchasePrice: 145, salePrice: 210, quantity: 35, minQuantity: 6 },
+  { code: "1027", barcode: "6223002001027", name: "آلة حاسبة مكتبية 12 رقم", category: "إلكترونيات مكتبية", unit: "قطعة", purchasePrice: 85, salePrice: 120, quantity: 28, minQuantity: 5 },
+  { code: "1028", barcode: "6223002001028", name: "قلّام سبورة خشبي", category: "إلكترونيات مكتبية", unit: "قطعة", purchasePrice: 15, salePrice: 24, quantity: 70, minQuantity: 10 },
+];
+
+export const customerSeed = [
+  { code: "C10001", name: "عميل نقدي", phone: "", address: "", customerType: "عادي", balance: 0 },
+  { code: "C10002", name: "مكتبة النور", phone: "01222355769", address: "القاهرة - مدينة نصر", customerType: "جملة", balance: 0 },
+  { code: "C10003", name: "مدرسة الأمل الابتدائية", phone: "01222355769", address: "الجيزة - المهندسين", customerType: "مدرسة", balance: 0 },
+  { code: "C10004", name: "شركة الصفا للقرطاسية", phone: "01222355769", address: "الإسكندرية", customerType: "جملة", balance: 0 },
+  { code: "C10005", name: "معرض المستقبل", phone: "01222355769", address: "المنصورة", customerType: "عادي", balance: 0 },
+];
+
+export const categorySeed = [
+  "كراسات وكشاكيل", "أقلام", "أدوات مدرسية", "أدوات هندسية", "ألوان ورسم",
+  "قرطاسية مكتبية", "حقائب وإكسسوارات", "إلكترونيات مكتبية", "كتب خارجية", "عام",
+];
