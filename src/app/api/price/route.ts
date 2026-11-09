@@ -8,8 +8,8 @@ export async function GET(request: Request) {
     const query = new URL(request.url).searchParams.get("q") ?? "";
     if (!query.trim()) return Response.json({ products: [], exact: null });
     return Response.json({
-      products: searchProducts(query),
-      exact: findProductByCode(query) ?? null,
+      products: await searchProducts(query),
+      exact: (await findProductByCode(query)) ?? null,
     });
   } catch (error) { return errorResponse(error); }
 }

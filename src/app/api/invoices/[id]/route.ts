@@ -9,7 +9,7 @@ export async function GET(_request: Request, { params }: Context) {
   try {
     const id = Number((await params).id);
     if (!id) return badRequest("رقم الفاتورة غير صحيح");
-    return Response.json({ invoice: getInvoice(id) });
+    return Response.json({ invoice: await getInvoice(id) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "تعذر عرض الفاتورة";
     return Response.json({ error: message }, { status: 400 });
@@ -20,7 +20,7 @@ export async function DELETE(_request: Request, { params }: Context) {
   try {
     const id = Number((await params).id);
     if (!id) return badRequest("رقم الفاتورة غير صحيح");
-    deleteInvoice(id);
+    await deleteInvoice(id);
     return Response.json({ ok: true });
   } catch (error) { return errorResponse(error); }
 }

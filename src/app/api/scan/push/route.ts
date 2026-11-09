@@ -9,7 +9,7 @@ export async function POST(request: Request) {
     const body = await readJson<{ code?: string; source?: string; target?: string }>(request);
     const code = String(body.code ?? "").trim();
     if (!code) return badRequest("الرمز فارغ");
-    return Response.json(pushScan(code, body.source ?? "phone", body.target ?? "pos"), { status: 201 });
+    return Response.json(await pushScan(code, body.source ?? "phone", body.target ?? "pos"), { status: 201 });
   } catch (error) { return errorResponse(error); }
 }
 

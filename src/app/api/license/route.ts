@@ -15,7 +15,7 @@ function isValidPassword(input: string): boolean {
 
 export async function GET() {
   try {
-    return Response.json({ license: getLicense(), version: LICENSE_CONFIG.appVersion });
+    return Response.json({ license: await getLicense(), version: LICENSE_CONFIG.appVersion });
   } catch (error) {
     return errorResponse(error);
   }
@@ -30,9 +30,9 @@ export async function POST(request: Request) {
       return Response.json({ error: "كلمة سر التفعيل غير صحيحة — تواصل مع م. وائل الجمال" }, { status: 401 });
     }
     if (body.action === "policy") {
-      return Response.json({ ok: true, license: setTrialPolicy(Number(body.days) || 10, Number(body.productLimit) || 25) });
+      return Response.json({ ok: true, license: await setTrialPolicy(Number(body.days) || 10, Number(body.productLimit) || 25) });
     }
-    return Response.json({ ok: true, license: activateLicense() });
+    return Response.json({ ok: true, license: await activateLicense() });
   } catch (error) {
     return errorResponse(error);
   }

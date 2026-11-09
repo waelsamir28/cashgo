@@ -1,27 +1,9 @@
-/**
- * طبقة البيانات المحلية (SQLite) — تُستخدم بواسطة كل مسارات /api داخل Next.js.
- * نفس ملف algamal.db الذي تستخدمه العملية الرئيسية في Electron (عبر database.js).
- * لا يحتاج المستخدم لأي برنامج قاعدة بيانات خارجي: better-sqlite3 مضمّن داخل الحزمة.
- */
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { createRequire } from "node:module";
+/** Neon/PostgreSQL persistence for the Vercel web application. */
+import { Pool, type PoolClient } from "pg";
 import { randomUUID } from "node:crypto";
-import schema from "./schema-sql.json";
 import { LICENSE_CONFIG } from "@/lib/license-config";
-
-// تحميل الوحدة الأصلية في وقت التشغيل من مجلد التطبيق نفسه (يعمل داخل EXE وفي التطوير).
-// نستخدم اسماً غير حرفي حتى لا يولّد المجمّع alias خارجياً يعتمد على مسار البناء.
-type SqliteDatabase = import("better-sqlite3").Database;
-type SqliteCtor = typeof import("better-sqlite3");
-function loadSqlite(): SqliteCtor {
-  const runtimeRequire = createRequire(path.join(process.cwd(), "algamal-runtime.cjs"));
-  const moduleName = ["better", "sqlite3"].join("-");
-  return runtimeRequire(moduleName) as SqliteCtor;
-}
-import { productSeed, customerSeed, categorySeed } from "./seed-data";
 import { round } from "@/lib/format";
+import { categorySeed } from "./seed-data";
 import {
   DEFAULT_SETTINGS,
   type InstallmentsData,
@@ -30,688 +12,155 @@ import {
   type StoreSettings,
 } from "@/lib/types";
 
-type Row = Record<string, unknown>;
-type IncomingItem = {
-  productId?: number | null;
-  productCode?: string;
-  productName?: string;
-  barcode?: string;
-  unit?: string;
-  quantity?: number;
-  price?: number;
-  discount?: number;
-};
-export type InvoiceInput = {
-  invoiceNo?: string;
-  type?: string;
-  customerId?: number | null;
-  customerName?: string;
-  paymentType?: string;
-  discount?: number;
-  tax?: number;
-  paid?: number;
-  notes?: string;
-  items?: IncomingItem[];
-  createdAt?: string;
-};
+type Row = Record<string, any>;
+type IncomingItem = { productId?: number | null; productCode?: string; productName?: string; barcode?: string; unit?: string; quantity?: number; price?: number; discount?: number };
+export type InvoiceInput = { invoiceNo?: string; type?: string; customerId?: number | null; customerName?: string; paymentType?: string; discount?: number; tax?: number; paid?: number; notes?: string; items?: IncomingItem[]; createdAt?: string };
+export type LicenseState = { installId: string; installedAt: string; activated: boolean; activatedAt: string | null; trialDays: number; trialProductLimit: number; daysUsed: number; daysLeft: number; expired: boolean; limited: boolean; productCount: number; totalProducts: number };
 
-let instance: SqliteDatabase | null = null;
-
-export function localDbPath(): string {
-  if (process.env.ALGAMAL_SQLITE_PATH) return process.env.ALGAMAL_SQLITE_PATH;
-  if (process.env.ALGAMAL_USER_DATA) return path.join(process.env.ALGAMAL_USER_DATA, "algamal.db");
-  const dir = process.platform === "win32"
-    ? path.join(os.homedir(), "AppData", "Roaming", "algamal-desktop")
-    : path.join(os.homedir(), ".local", "share", "algamal-desktop");
-  return path.join(dir, "algamal.db");
+const globalPool = globalThis as typeof globalThis & { __cashgoPool?: Pool; __cashgoSchemaReady?: Promise<void> };
+function getPool(): Pool {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) throw new Error("DATABASE_URL غير مضبوط. أضف رابط Neon في إعدادات Environment Variables على Vercel.");
+  if (!globalPool.__cashgoPool) globalPool.__cashgoPool = new Pool({
+    connectionString,
+    max: 5,
+    idleTimeoutMillis: 10_000,
+    connectionTimeoutMillis: 10_000,
+    ssl: connectionString.includes("neon.tech") ? { rejectUnauthorized: false } : undefined,
+  });
+  return globalPool.__cashgoPool;
 }
-
-const str = (value: unknown, fallback = "") => (value === undefined || value === null ? fallback : String(value).trim());
+const camel = (key: string) => key.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+const rows = (result: { rows: Row[] }): Row[] => result.rows.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [camel(key), value])));
+const str = (value: unknown, fallback = "") => value == null ? fallback : String(value).trim();
 const num = (value: unknown) => { const n = Number(value ?? 0); return Number.isFinite(n) ? n : 0; };
 const nowIso = () => new Date().toISOString();
 
-function seedIfEmpty(db: SqliteDatabase) {
-  const count = (table: string) => (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
-
-  for (const name of categorySeed) {
-    db.prepare("INSERT OR IGNORE INTO categories (name) VALUES (?)").run(name);
-  }
-  for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
-    db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run(key, value);
-  }
-
-  if (count("products") === 0) {
-    const insert = db.prepare(`INSERT INTO products
-      (code, barcode, name, category, unit, purchasePrice, salePrice, quantity, minQuantity, taxRate, active, createdAt)
-      VALUES (@code, @barcode, @name, @category, @unit, @purchasePrice, @salePrice, @quantity, @minQuantity, 0, 1, @createdAt)`);
-    db.transaction(() => {
-      for (const product of productSeed) insert.run({ ...product, createdAt: nowIso() });
+/** Create missing tables/indexes once per warm server instance; safe to run concurrently. */
+async function ensureSchema(): Promise<void> {
+  if (!globalPool.__cashgoSchemaReady) {
+    globalPool.__cashgoSchemaReady = (async () => {
+      const db = getPool();
+      const ddl = [
+        `CREATE TABLE IF NOT EXISTS products (id SERIAL PRIMARY KEY, code TEXT NOT NULL UNIQUE, barcode TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'عام', unit TEXT NOT NULL DEFAULT 'قطعة', purchase_price NUMERIC(14,3) NOT NULL DEFAULT 0, sale_price NUMERIC(14,3) NOT NULL DEFAULT 0, quantity NUMERIC(14,3) NOT NULL DEFAULT 0, min_quantity NUMERIC(14,3) NOT NULL DEFAULT 0, tax_rate NUMERIC(14,3) NOT NULL DEFAULT 0, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+        `CREATE TABLE IF NOT EXISTS customers (id SERIAL PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '', address TEXT NOT NULL DEFAULT '', customer_type TEXT NOT NULL DEFAULT 'عادي', balance NUMERIC(14,3) NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+        `CREATE TABLE IF NOT EXISTS invoices (id SERIAL PRIMARY KEY, invoice_no TEXT NOT NULL UNIQUE, type TEXT NOT NULL DEFAULT 'sale', customer_id INTEGER, customer_name TEXT NOT NULL DEFAULT 'عميل نقدي', payment_type TEXT NOT NULL DEFAULT 'نقدي', subtotal NUMERIC(14,3) NOT NULL DEFAULT 0, discount NUMERIC(14,3) NOT NULL DEFAULT 0, tax NUMERIC(14,3) NOT NULL DEFAULT 0, total NUMERIC(14,3) NOT NULL DEFAULT 0, paid NUMERIC(14,3) NOT NULL DEFAULT 0, remaining NUMERIC(14,3) NOT NULL DEFAULT 0, notes TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'محفوظة', invoice_date TIMESTAMPTZ NOT NULL DEFAULT NOW(), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+        `CREATE TABLE IF NOT EXISTS invoice_items (id SERIAL PRIMARY KEY, invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE, product_id INTEGER, product_code TEXT NOT NULL DEFAULT '', product_name TEXT NOT NULL, barcode TEXT NOT NULL DEFAULT '', unit TEXT NOT NULL DEFAULT 'قطعة', quantity NUMERIC(14,3) NOT NULL DEFAULT 0, price NUMERIC(14,3) NOT NULL DEFAULT 0, discount NUMERIC(14,3) NOT NULL DEFAULT 0, total NUMERIC(14,3) NOT NULL DEFAULT 0)`,
+        `CREATE TABLE IF NOT EXISTS payments (id SERIAL PRIMARY KEY, customer_id INTEGER NOT NULL, amount NUMERIC(14,3) NOT NULL DEFAULT 0, method TEXT NOT NULL DEFAULT 'نقدي', note TEXT NOT NULL DEFAULT '', payment_date TIMESTAMPTZ NOT NULL DEFAULT NOW(), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+        `CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+        `CREATE TABLE IF NOT EXISTS settings (id SERIAL PRIMARY KEY, key TEXT NOT NULL UNIQUE, value TEXT NOT NULL DEFAULT '')`,
+        `CREATE TABLE IF NOT EXISTS support_tickets (id SERIAL PRIMARY KEY, name TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '', subject TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'جديدة', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+        `CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name TEXT NOT NULL, username TEXT UNIQUE, password TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'admin', phone TEXT NOT NULL DEFAULT '', active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+        `CREATE TABLE IF NOT EXISTS license (id INTEGER PRIMARY KEY CHECK (id = 1), install_id TEXT NOT NULL, installed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), activated BOOLEAN NOT NULL DEFAULT FALSE, activated_at TIMESTAMPTZ, trial_days INTEGER NOT NULL DEFAULT 10, trial_product_limit INTEGER NOT NULL DEFAULT 25)`,
+        `CREATE TABLE IF NOT EXISTS scan_queue (id SERIAL PRIMARY KEY, code TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'phone', target TEXT NOT NULL DEFAULT 'pos', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), consumed BOOLEAN NOT NULL DEFAULT FALSE)`,
+        `CREATE INDEX IF NOT EXISTS idx_scan_queue_poll ON scan_queue(consumed, target, id)`,
+        `CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice ON invoice_items(invoice_id)`,
+        `CREATE INDEX IF NOT EXISTS idx_payments_customer ON payments(customer_id)`,
+        `CREATE INDEX IF NOT EXISTS idx_products_category ON products(category)`,
+      ];
+      try {
+        for (const sql of ddl) await db.query(sql);
+        for (const name of categorySeed) await db.query("INSERT INTO categories(name) VALUES($1) ON CONFLICT(name) DO NOTHING", [name]);
+        for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) await db.query("INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO NOTHING", [key, String(value)]);
+      } catch (error) { globalPool.__cashgoSchemaReady = undefined; throw error; }
     })();
   }
-
-  if (count("customers") === 0) {
-    const insert = db.prepare(`INSERT INTO customers (code, name, phone, address, customerType, balance, createdAt) VALUES (?,?,?,?,?,0,?)`);
-    db.transaction(() => {
-      for (const customer of customerSeed) insert.run(customer.code, customer.name, customer.phone, customer.address, customer.customerType, nowIso());
-    })();
-  }
-
-  // بيانات تجريبية خفيفة لإظهار التقارير والفواتير من أول تشغيل
-  if (count("invoices") === 0) {
-    const getProduct = (code: string) => db.prepare("SELECT * FROM products WHERE code = ?").get(code) as Row | undefined;
-    const getCustomer = (code: string) => db.prepare("SELECT * FROM customers WHERE code = ?").get(code) as Row | undefined;
-    const library = getCustomer("C10002");
-    const school = getCustomer("C10003");
-    const samples = [
-      { no: "1001", customer: library, paymentType: "نقدي", days: 0, codes: [["1001", 4], ["1006", 2], ["1016", 1]] as [string, number][] },
-      { no: "1002", customer: school, paymentType: "قسط", days: 75, codes: [["1029", 2], ["1032", 1]] as [string, number][] },
-    ];
-    db.transaction(() => {
-      for (const sample of samples) {
-        if (!sample.customer) continue;
-        const createdAt = new Date(Date.now() - sample.days * 86400000).toISOString();
-        const lines = sample.codes.map(([code, qty]) => ({ product: getProduct(code), qty })).filter((line) => line.product);
-        let subtotal = 0;
-        for (const line of lines) subtotal += line.qty * num(line.product!.salePrice);
-        subtotal = round(subtotal);
-        const paid = sample.paymentType === "نقدي" ? subtotal : 0;
-        const info = db.prepare(`INSERT INTO invoices
-          (invoiceNo, type, customerId, customerName, paymentType, subtotal, discount, tax, total, paid, remaining, notes, status, invoiceDate, createdAt)
-          VALUES (?, 'sale', ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?)`)
-          .run(sample.no, sample.customer.id, sample.customer.name, sample.paymentType, subtotal, subtotal, paid, round(subtotal - paid), "بيانات تجريبية", paid < subtotal ? "آجل" : "محفوظة", createdAt, createdAt);
-        const invoiceId = Number(info.lastInsertRowid);
-        const insertItem = db.prepare(`INSERT INTO invoiceItems (invoiceId, productId, productCode, productName, barcode, unit, quantity, price, discount, total) VALUES (?,?,?,?,?,?,?,?,0,?)`);
-        for (const line of lines) {
-          const product = line.product!;
-          insertItem.run(invoiceId, product.id, product.code, product.name, product.barcode, product.unit, line.qty, product.salePrice, round(line.qty * num(product.salePrice)));
-          db.prepare("UPDATE products SET quantity = quantity - ? WHERE id = ?").run(line.qty, product.id);
-        }
-        if (subtotal - paid > 0) {
-          db.prepare("UPDATE customers SET balance = balance + ? WHERE id = ?").run(round(subtotal - paid), sample.customer.id);
-        }
-      }
-    })();
-  }
+  await globalPool.__cashgoSchemaReady;
 }
-
-export function getLocalDb(): SqliteDatabase {
-  if (instance) return instance;
-  const file = localDbPath();
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const SqliteCtor = loadSqlite();
-  const db = new SqliteCtor(file);
-  db.pragma("journal_mode = WAL");
-  db.pragma("synchronous = NORMAL");
-  db.pragma("foreign_keys = ON");
-  db.pragma("busy_timeout = 5000");
-  for (const statement of schema.statements) db.exec(statement);
-  seedIfEmpty(db);
-  instance = db;
-  return db;
+async function query(sql: string, params: unknown[] = []) { await ensureSchema(); return getPool().query(sql, params); }
+async function all(sql: string, params: unknown[] = []): Promise<Row[]> { return rows(await query(sql, params)); }
+async function one(sql: string, params: unknown[] = []): Promise<Row | undefined> { return (await all(sql, params))[0]; }
+async function tx<T>(callback: (client: PoolClient) => Promise<T>): Promise<T> {
+  await ensureSchema(); const client = await getPool().connect();
+  try { await client.query("BEGIN"); const result = await callback(client); await client.query("COMMIT"); return result; }
+  catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
 }
-
-export function healthCheck(): boolean {
-  getLocalDb().prepare("SELECT 1 AS ok").get();
-  return true;
-}
-
 const mapProduct = (row: Row): Row => ({ ...row, active: Boolean(row.active) });
-const mapRows = (rows: Row[]) => rows.map(mapProduct);
+const mapRows = (data: Row[]) => data.map(mapProduct);
 
-/* ========================= الترخيص / الفترة التجريبية ========================= */
-export type LicenseState = {
-  installId: string;
-  installedAt: string;
-  activated: boolean;
-  activatedAt: string | null;
-  trialDays: number;
-  trialProductLimit: number;
-  daysUsed: number;
-  daysLeft: number;
-  expired: boolean;
-  limited: boolean;
-  productCount: number;
-  totalProducts: number;
-};
+export async function healthCheck(): Promise<boolean> { await query("SELECT 1"); return true; }
 
-export function getLicense(): LicenseState {
-  const db = getLocalDb();
-  let row = db.prepare("SELECT * FROM license WHERE id = 1").get() as Row | undefined;
-  if (!row) {
-    db.prepare("INSERT INTO license (id, installId, installedAt, trialDays, trialProductLimit) VALUES (1, ?, ?, ?, ?)")
-      .run(randomUUID(), nowIso(), LICENSE_CONFIG.trialDays, LICENSE_CONFIG.trialProductLimit);
-    row = db.prepare("SELECT * FROM license WHERE id = 1").get() as Row;
-  }
-  const installed = new Date(String(row.installedAt)).getTime();
+export async function getLicense(): Promise<LicenseState> {
+  await query(`INSERT INTO license(id,install_id,trial_days,trial_product_limit) VALUES(1,$1,$2,$3) ON CONFLICT(id) DO NOTHING`, [randomUUID(), LICENSE_CONFIG.trialDays, LICENSE_CONFIG.trialProductLimit]);
+  const row = (await one("SELECT * FROM license WHERE id=1"))!;
+  const total = Number((await one("SELECT COUNT(*) AS n FROM products"))?.n ?? 0);
+  const installed = new Date(row.installedAt).getTime();
   const daysUsed = Math.max(0, Math.floor((Date.now() - installed) / 86400000));
   const trialDays = Number(row.trialDays) || LICENSE_CONFIG.trialDays;
   const trialProductLimit = Number(row.trialProductLimit) || LICENSE_CONFIG.trialProductLimit;
   const activated = Boolean(row.activated);
-  const totalProducts = (db.prepare("SELECT COUNT(*) AS n FROM products").get() as { n: number }).n;
-  return {
-    installId: String(row.installId),
-    installedAt: String(row.installedAt),
-    activated,
-    activatedAt: row.activatedAt ? String(row.activatedAt) : null,
-    trialDays,
-    trialProductLimit,
-    daysUsed,
-    daysLeft: Math.max(0, trialDays - daysUsed),
-    expired: !activated && daysUsed >= trialDays,
-    limited: !activated,
-    productCount: totalProducts,
-    totalProducts,
-  };
+  return { installId: String(row.installId), installedAt: new Date(row.installedAt).toISOString(), activated, activatedAt: row.activatedAt ? new Date(row.activatedAt).toISOString() : null, trialDays, trialProductLimit, daysUsed, daysLeft: Math.max(0, trialDays - daysUsed), expired: !activated && daysUsed >= trialDays, limited: !activated, productCount: total, totalProducts: total };
 }
+export async function activateLicense(): Promise<LicenseState> { await getLicense(); await query("UPDATE license SET activated=TRUE, activated_at=NOW() WHERE id=1"); return getLicense(); }
+export async function setTrialPolicy(days: number, productLimit: number): Promise<LicenseState> { await getLicense(); await query("UPDATE license SET trial_days=$1, trial_product_limit=$2 WHERE id=1", [Math.max(1, Math.round(days)), Math.max(1, Math.round(productLimit))]); return getLicense(); }
 
-export function activateLicense(): LicenseState {
-  const db = getLocalDb();
-  getLicense(); // يضمن وجود السجل
-  db.prepare("UPDATE license SET activated = 1, activatedAt = ? WHERE id = 1").run(nowIso());
-  return getLicense();
+export async function listProducts() {
+  const license = await getLicense();
+  return mapRows(license.activated ? await all("SELECT * FROM products ORDER BY id DESC") : await all("SELECT * FROM (SELECT * FROM products ORDER BY id ASC LIMIT $1) p ORDER BY id DESC", [license.trialProductLimit]));
 }
-
-/** يُستخدم فقط من واجهة البرنامج للتحكم في مدة/حدود النسخة (بصلاحية المطور) */
-export function setTrialPolicy(days: number, productLimit: number): LicenseState {
-  const db = getLocalDb();
-  getLicense();
-  db.prepare("UPDATE license SET trialDays = ?, trialProductLimit = ? WHERE id = 1")
-    .run(Math.max(1, Math.round(days)), Math.max(1, Math.round(productLimit)));
-  return getLicense();
-}
-
-/* ========================= products ========================= */
-export function listProducts() {
-  const db = getLocalDb();
-  const license = getLicense();
-  // في النسخة التجريبية نعرض عدداً محدداً من الأصناف فقط (عيّنة ثابتة).
-  const rows = license.activated
-    ? db.prepare("SELECT * FROM products ORDER BY id DESC").all()
-    : db.prepare("SELECT * FROM (SELECT * FROM products ORDER BY id ASC LIMIT ?) ORDER BY id DESC").all(license.trialProductLimit);
-  return mapRows(rows as Row[]);
-}
-
-export function insertProduct(body: Row) {
-  const db = getLocalDb();
-  const license = getLicense();
-  if (license.limited && license.totalProducts >= license.trialProductLimit) {
-    throw new Error(`النسخة التجريبية تسمح بـ ${license.trialProductLimit} صنفاً فقط — فعّل البرنامج لإضافة أصناف غير محدودة`);
-  }
+export async function insertProduct(body: Row) {
+  const license = await getLicense();
+  if (license.limited && license.totalProducts >= license.trialProductLimit) throw new Error(`النسخة التجريبية تسمح بـ ${license.trialProductLimit} صنفاً فقط — فعّل البرنامج لإضافة أصناف غير محدودة`);
   const code = str(body.code) || `P${Date.now().toString().slice(-7)}`;
-  const info = db.prepare(`INSERT INTO products
-    (code, barcode, name, category, unit, purchasePrice, salePrice, quantity, minQuantity, taxRate, active, createdAt)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-    code, str(body.barcode), str(body.name), str(body.category, "عام") || "عام", str(body.unit, "قطعة") || "قطعة",
-    num(body.purchasePrice), num(body.salePrice), num(body.quantity), num(body.minQuantity), num(body.taxRate),
-    body.active === false ? 0 : 1, nowIso(),
-  );
-  return mapProduct(db.prepare("SELECT * FROM products WHERE id = ?").get(info.lastInsertRowid) as Row);
+  const r = await query(`INSERT INTO products(code,barcode,name,category,unit,purchase_price,sale_price,quantity,min_quantity,tax_rate,active) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`, [code,str(body.barcode),str(body.name),str(body.category,"عام")||"عام",str(body.unit,"قطعة")||"قطعة",num(body.purchasePrice),num(body.salePrice),num(body.quantity),num(body.minQuantity),num(body.taxRate),body.active !== false]);
+  return mapProduct(rows(r)[0]);
 }
-
-export function updateProduct(body: Row) {
-  const db = getLocalDb();
+export async function updateProduct(body: Row) {
   const id = Number(body.id);
-  const info = db.prepare(`UPDATE products SET code=?, barcode=?, name=?, category=?, unit=?, purchasePrice=?, salePrice=?, quantity=?, minQuantity=?, taxRate=?, active=? WHERE id=?`).run(
-    str(body.code) || `P${Date.now().toString().slice(-7)}`, str(body.barcode), str(body.name),
-    str(body.category, "عام") || "عام", str(body.unit, "قطعة") || "قطعة",
-    num(body.purchasePrice), num(body.salePrice), num(body.quantity), num(body.minQuantity), num(body.taxRate),
-    body.active === false ? 0 : 1, id,
-  );
-  if (info.changes === 0) throw new Error("الصنف غير موجود");
-  return mapProduct(db.prepare("SELECT * FROM products WHERE id = ?").get(id) as Row);
+  const r = await query(`UPDATE products SET code=$1,barcode=$2,name=$3,category=$4,unit=$5,purchase_price=$6,sale_price=$7,quantity=$8,min_quantity=$9,tax_rate=$10,active=$11 WHERE id=$12 RETURNING *`, [str(body.code)||`P${Date.now().toString().slice(-7)}`,str(body.barcode),str(body.name),str(body.category,"عام")||"عام",str(body.unit,"قطعة")||"قطعة",num(body.purchasePrice),num(body.salePrice),num(body.quantity),num(body.minQuantity),num(body.taxRate),body.active!==false,id]);
+  const result = rows(r)[0]; if (!result) throw new Error("الصنف غير موجود"); return mapProduct(result);
 }
-
-export function deleteProduct(id: number) {
-  getLocalDb().prepare("DELETE FROM products WHERE id = ?").run(id);
+export async function deleteProduct(id: number) { await query("DELETE FROM products WHERE id=$1", [id]); }
+export async function listCustomers() { return all("SELECT * FROM customers ORDER BY id DESC"); }
+export async function insertCustomer(body: Row) {
+  const r = await query("INSERT INTO customers(code,name,phone,address,customer_type,balance) VALUES($1,$2,$3,$4,$5,$6) RETURNING *", [`C${Date.now().toString().slice(-8)}`,str(body.name),str(body.phone),str(body.address),str(body.customerType,"عادي")||"عادي",num(body.balance)]); return rows(r)[0];
 }
-
-/* ========================= customers ========================= */
-export function listCustomers() {
-  return getLocalDb().prepare("SELECT * FROM customers ORDER BY id DESC").all() as Row[];
+export async function listCategories() {
+  const aggregated = await all("SELECT category AS name,COUNT(*) AS count,COALESCE(SUM(quantity*purchase_price),0) AS stock_value FROM products GROUP BY category");
+  const map = new Map<string, Row>(); for (const row of aggregated) map.set(String(row.name), { name:row.name,count:Number(row.count),stockValue:round(num(row.stockValue)) });
+  for (const row of await all("SELECT name FROM categories")) if (!map.has(String(row.name))) map.set(String(row.name),{name:row.name,count:0,stockValue:0});
+  return Array.from(map.values()).sort((a,b)=>num(b.count)-num(a.count)||String(a.name).localeCompare(String(b.name),"ar"));
 }
+export async function insertCategory(name: string) { await query("INSERT INTO categories(name) VALUES($1) ON CONFLICT(name) DO NOTHING",[name]); return listCategories(); }
+export async function renameCategory(name: string,newName: string) { await tx(async c=>{await c.query("INSERT INTO categories(name) VALUES($1) ON CONFLICT(name) DO NOTHING",[newName]); await c.query("UPDATE products SET category=$1 WHERE category=$2",[newName,name]); await c.query("DELETE FROM categories WHERE name=$1",[name]);}); return listCategories(); }
+export async function deleteCategory(name: string,moveTo: string) { const n=Number((await one("SELECT COUNT(*) AS n FROM products WHERE category=$1",[name]))?.n??0); if(n&&!moveTo) throw new Error(`المجموعة «${name}» تحتوي ${n} صنف — اختر نقلهم لمجموعة أخرى أولاً`); await tx(async c=>{if(n) await c.query("UPDATE products SET category=$1 WHERE category=$2",[moveTo||"عام",name]); await c.query("DELETE FROM categories WHERE name=$1",[name]);}); return listCategories(); }
 
-export function insertCustomer(body: Row) {
-  const db = getLocalDb();
-  const info = db.prepare(`INSERT INTO customers (code, name, phone, address, customerType, balance, createdAt) VALUES (?,?,?,?,?,?,?)`).run(
-    `C${Date.now().toString().slice(-8)}`, str(body.name), str(body.phone), str(body.address),
-    str(body.customerType, "عادي") || "عادي", num(body.balance), nowIso(),
-  );
-  return db.prepare("SELECT * FROM customers WHERE id = ?").get(info.lastInsertRowid) as Row;
-}
-
-/* ========================= categories ========================= */
-export function listCategories() {
-  const db = getLocalDb();
-  const aggregated = db.prepare(`SELECT category AS name, COUNT(*) AS count, COALESCE(SUM(quantity * purchasePrice), 0) AS stockValue FROM products GROUP BY category`).all() as Row[];
-  const map = new Map<string, Row>();
-  for (const row of aggregated) map.set(String(row.name), { name: row.name, count: row.count, stockValue: round(num(row.stockValue)) });
-  for (const row of db.prepare("SELECT name FROM categories").all() as Row[]) {
-    if (!map.has(String(row.name))) map.set(String(row.name), { name: row.name, count: 0, stockValue: 0 });
-  }
-  return Array.from(map.values()).sort((a, b) => num(b.count) - num(a.count) || String(a.name).localeCompare(String(b.name), "ar"));
-}
-
-export function insertCategory(name: string) {
-  getLocalDb().prepare("INSERT OR IGNORE INTO categories (name) VALUES (?)").run(name);
-  return listCategories();
-}
-
-export function renameCategory(name: string, newName: string) {
-  const db = getLocalDb();
-  db.transaction(() => {
-    db.prepare("INSERT OR IGNORE INTO categories (name) VALUES (?)").run(newName);
-    db.prepare("UPDATE OR IGNORE categories SET name = ? WHERE name = ?").run(newName, name);
-    db.prepare("DELETE FROM categories WHERE name = ?").run(name);
-    db.prepare("UPDATE products SET category = ? WHERE category = ?").run(newName, name);
-  })();
-  return listCategories();
-}
-
-export function deleteCategory(name: string, moveTo: string) {
-  const db = getLocalDb();
-  const row = db.prepare("SELECT COUNT(*) AS n FROM products WHERE category = ?").get(name) as { n: number };
-  if (row.n > 0 && !moveTo) throw new Error(`المجموعة «${name}» تحتوي ${row.n} صنف — اختر نقلهم لمجموعة أخرى أولاً`);
-  db.transaction(() => {
-    if (row.n > 0) db.prepare("UPDATE products SET category = ? WHERE category = ?").run(moveTo || "عام", name);
-    db.prepare("DELETE FROM categories WHERE name = ?").run(name);
-  })();
-  return listCategories();
-}
-
-/* ========================= invoices ========================= */
-export function nextInvoiceNo(): string {
-  const row = getLocalDb().prepare("SELECT COALESCE(MAX(id), 0) AS n FROM invoices").get() as { n: number };
-  return String(1000 + num(row.n) + 1);
-}
-
-export function listInvoices(type?: string) {
-  const db = getLocalDb();
-  return (type
-    ? db.prepare("SELECT * FROM invoices WHERE type = ? ORDER BY id DESC LIMIT 100").all(type)
-    : db.prepare("SELECT * FROM invoices ORDER BY id DESC LIMIT 100").all()) as Row[];
-}
-
-export function getInvoice(id: number) {
-  const db = getLocalDb();
-  const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(id) as Row | undefined;
-  if (!invoice) throw new Error("الفاتورة غير موجودة");
-  return { ...invoice, items: db.prepare("SELECT * FROM invoiceItems WHERE invoiceId = ? ORDER BY id").all(id) as Row[] };
-}
-
-export function createInvoice(body: InvoiceInput) {
-  const db = getLocalDb();
-  const type = body.type === "purchase" ? "purchase" : "sale";
-  const rawItems = Array.isArray(body.items) ? body.items : [];
-  const items = rawItems
-    .filter((item) => str(item.productName) && num(item.quantity) > 0)
-    .map((item) => ({
-      productId: item.productId ? Number(item.productId) : null,
-      productCode: str(item.productCode), productName: str(item.productName), barcode: str(item.barcode),
-      unit: str(item.unit, "قطعة") || "قطعة", quantity: round(num(item.quantity)),
-      price: round(num(item.price)), discount: round(num(item.discount)),
-    }));
-  if (items.length === 0) throw new Error("لا يمكن حفظ فاتورة بدون أصناف");
-
-  return db.transaction(() => {
-    if (type === "sale") {
-      for (const item of items) {
-        if (!item.productId) continue;
-        const product = db.prepare("SELECT name, quantity FROM products WHERE id = ?").get(item.productId) as Row | undefined;
-        if (product && num(product.quantity) < item.quantity) {
-          throw new Error(`الكمية غير متوفرة للمخزون: ${product.name} (المتوفر ${product.quantity})`);
-        }
-      }
-    }
-
-    let invoiceNo = str(body.invoiceNo);
-    if (invoiceNo && db.prepare("SELECT id FROM invoices WHERE invoiceNo = ?").get(invoiceNo)) invoiceNo = "";
-    if (!invoiceNo) invoiceNo = nextInvoiceNo();
-
-    const subtotal = round(items.reduce((sum, item) => sum + item.quantity * item.price, 0));
-    const discount = round(num(body.discount));
-    const tax = round(num(body.tax));
-    const total = round(subtotal - discount + tax);
-    const paid = round(body.paid === undefined ? total : num(body.paid));
-    const remaining = round(Math.max(0, total - paid));
-    const createdAt = body.createdAt || nowIso();
-
-    const info = db.prepare(`INSERT INTO invoices
-      (invoiceNo, type, customerId, customerName, paymentType, subtotal, discount, tax, total, paid, remaining, notes, status, invoiceDate, createdAt)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-      invoiceNo, type, body.customerId ? Number(body.customerId) : null,
-      str(body.customerName, "عميل نقدي") || "عميل نقدي", str(body.paymentType, "نقدي") || "نقدي",
-      subtotal, discount, tax, total, paid, remaining, str(body.notes), remaining > 0 ? "آجل" : "محفوظة", createdAt, createdAt,
-    );
-    const invoiceId = Number(info.lastInsertRowid);
-    const insertItem = db.prepare(`INSERT INTO invoiceItems
-      (invoiceId, productId, productCode, productName, barcode, unit, quantity, price, discount, total) VALUES (?,?,?,?,?,?,?,?,?,?)`);
-    for (const item of items) {
-      insertItem.run(invoiceId, item.productId, item.productCode, item.productName, item.barcode, item.unit,
-        item.quantity, item.price, item.discount, round(item.quantity * item.price - item.discount));
-      if (item.productId) {
-        const delta = type === "sale" ? -item.quantity : item.quantity;
-        db.prepare("UPDATE products SET quantity = quantity + ? WHERE id = ?").run(delta, item.productId);
-      }
-    }
-    if (type === "sale" && remaining > 0 && body.customerId) {
-      db.prepare("UPDATE customers SET balance = balance + ? WHERE id = ?").run(remaining, Number(body.customerId));
-    }
-    return db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoiceId) as Row;
-  })();
-}
-
-export function deleteInvoice(id: number) {
-  const db = getLocalDb();
-  db.transaction(() => {
-    const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(id) as Row | undefined;
-    if (!invoice) throw new Error("الفاتورة غير موجودة");
-    const items = db.prepare("SELECT * FROM invoiceItems WHERE invoiceId = ?").all(id) as Row[];
-    for (const item of items) {
-      if (!item.productId) continue;
-      const delta = invoice.type === "sale" ? num(item.quantity) : -num(item.quantity);
-      db.prepare("UPDATE products SET quantity = quantity + ? WHERE id = ?").run(delta, item.productId);
-    }
-    if (invoice.type === "sale" && invoice.customerId && num(invoice.remaining) > 0) {
-      db.prepare("UPDATE customers SET balance = MAX(0, balance - ?) WHERE id = ?").run(num(invoice.remaining), invoice.customerId);
-    }
-    db.prepare("DELETE FROM invoiceItems WHERE invoiceId = ?").run(id);
-    db.prepare("DELETE FROM invoices WHERE id = ?").run(id);
-  })();
-}
-
-/* ========================= payments ========================= */
-export function listPayments(customerId?: number) {
-  const db = getLocalDb();
-  return (customerId
-    ? db.prepare("SELECT * FROM payments WHERE customerId = ? ORDER BY paymentDate DESC LIMIT 200").all(customerId)
-    : db.prepare("SELECT * FROM payments ORDER BY paymentDate DESC LIMIT 200").all()) as Row[];
-}
-
-export function insertPayment(body: Row) {
-  const db = getLocalDb();
-  const customerId = Number(body.customerId);
-  const amount = num(body.amount);
-  if (!customerId || amount <= 0) throw new Error("اختر العميل وأدخل مبلغاً صحيحاً أكبر من صفر");
-  const parsed = body.paymentDate ? new Date(String(body.paymentDate)) : new Date();
-  const paymentDate = Number.isNaN(parsed.getTime()) ? nowIso() : parsed.toISOString();
-  return db.transaction(() => {
-    const info = db.prepare("INSERT INTO payments (customerId, amount, method, note, paymentDate, createdAt) VALUES (?,?,?,?,?,?)")
-      .run(customerId, amount, str(body.method, "نقدي") || "نقدي", str(body.note), paymentDate, nowIso());
-    db.prepare("UPDATE customers SET balance = MAX(0, balance - ?) WHERE id = ?").run(amount, customerId);
-    return db.prepare("SELECT * FROM payments WHERE id = ?").get(info.lastInsertRowid) as Row;
-  })();
-}
-
-export function deletePayment(id: number) {
-  const db = getLocalDb();
-  db.transaction(() => {
-    const payment = db.prepare("SELECT * FROM payments WHERE id = ?").get(id) as Row | undefined;
-    if (!payment) throw new Error("الدفعة غير موجودة");
-    db.prepare("DELETE FROM payments WHERE id = ?").run(id);
-    db.prepare("UPDATE customers SET balance = balance + ? WHERE id = ?").run(num(payment.amount), payment.customerId);
-  })();
-}
-
-/* ========================= statement & installments ========================= */
-type Entry = { id: string; date: Date; kind: "invoice" | "payment"; description: string; reference: string; debit: number; credit: number; net: number };
-
-export function getStatement(customerId: number, fromText = "", toText = ""): StatementData {
-  const db = getLocalDb();
-  const customer = db.prepare("SELECT * FROM customers WHERE id = ?").get(customerId) as Row | undefined;
-  if (!customer) throw new Error("العميل غير موجود");
-  const from = fromText ? new Date(`${fromText}T00:00:00`) : null;
-  const to = toText ? new Date(`${toText}T23:59:59.999`) : null;
-  const validFrom = from && !Number.isNaN(from.getTime()) ? from : null;
-  const validTo = to && !Number.isNaN(to.getTime()) ? to : null;
-
-  const entries: Entry[] = [];
-  for (const invoice of db.prepare("SELECT * FROM invoices WHERE customerId = ? AND type = 'sale'").all(customerId) as Row[]) {
-    entries.push({
-      id: `invoice-${invoice.id}`, date: new Date(String(invoice.createdAt)), kind: "invoice",
-      description: `فاتورة مبيعات - ${invoice.paymentType}`, reference: String(invoice.invoiceNo),
-      debit: num(invoice.total), credit: num(invoice.paid), net: num(invoice.total) - num(invoice.paid),
-    });
-  }
-  for (const payment of db.prepare("SELECT * FROM payments WHERE customerId = ?").all(customerId) as Row[]) {
-    entries.push({
-      id: `payment-${payment.id}`, date: new Date(String(payment.paymentDate)), kind: "payment",
-      description: `دفعة ${payment.method}${payment.note ? ` - ${payment.note}` : ""}`, reference: `PAY-${payment.id}`,
-      debit: 0, credit: num(payment.amount), net: -num(payment.amount),
-    });
-  }
-  entries.sort((a, b) => a.date.getTime() - b.date.getTime());
-  const opening = round(entries.filter((e) => validFrom && e.date < validFrom).reduce((sum, e) => sum + e.net, 0));
-  const inRange = entries.filter((e) => (!validFrom || e.date >= validFrom) && (!validTo || e.date <= validTo));
-  let running = opening;
-  let debitTotal = 0;
-  let creditTotal = 0;
-  const transactions = inRange.map((entry) => {
-    running = round(running + entry.net);
-    debitTotal += entry.debit; creditTotal += entry.credit;
-    return {
-      id: entry.id, date: entry.date.toISOString(), kind: entry.kind, description: entry.description,
-      reference: entry.reference, debit: round(entry.debit), credit: round(entry.credit), balance: running,
-    };
+export async function nextInvoiceNo(): Promise<string> { return String(1000+Number((await one("SELECT COALESCE(MAX(id),0) AS n FROM invoices"))?.n??0)+1); }
+export async function listInvoices(type?: string) { return type ? all("SELECT * FROM invoices WHERE type=$1 ORDER BY id DESC LIMIT 100",[type]) : all("SELECT * FROM invoices ORDER BY id DESC LIMIT 100"); }
+export async function getInvoice(id: number) { const invoice=await one("SELECT * FROM invoices WHERE id=$1",[id]); if(!invoice) throw new Error("الفاتورة غير موجودة"); return {...invoice,items:await all("SELECT * FROM invoice_items WHERE invoice_id=$1 ORDER BY id",[id])}; }
+export async function createInvoice(body: InvoiceInput) {
+  const type=body.type==="purchase"?"purchase":"sale";
+  const items=(Array.isArray(body.items)?body.items:[]).filter(i=>str(i.productName)&&num(i.quantity)>0).map(i=>({productId:i.productId?Number(i.productId):null,productCode:str(i.productCode),productName:str(i.productName),barcode:str(i.barcode),unit:str(i.unit,"قطعة")||"قطعة",quantity:round(num(i.quantity)),price:round(num(i.price)),discount:round(num(i.discount))}));
+  if(!items.length) throw new Error("لا يمكن حفظ فاتورة بدون أصناف");
+  return tx(async c=>{
+    if(type==="sale") for(const item of items){if(!item.productId)continue; const p=rows(await c.query("SELECT name,quantity FROM products WHERE id=$1 FOR UPDATE",[item.productId]))[0]; if(p&&num(p.quantity)<item.quantity) throw new Error(`الكمية غير متوفرة للمخزون: ${p.name} (المتوفر ${p.quantity})`);}
+    let invoiceNo=str(body.invoiceNo); if(invoiceNo&&(await c.query("SELECT id FROM invoices WHERE invoice_no=$1",[invoiceNo])).rowCount) invoiceNo=""; if(!invoiceNo) invoiceNo=String(1000+Number((rows(await c.query("SELECT COALESCE(MAX(id),0) AS n FROM invoices"))[0]).n)+1);
+    const subtotal=round(items.reduce((s,i)=>s+i.quantity*i.price,0)),discount=round(num(body.discount)),tax=round(num(body.tax)),total=round(subtotal-discount+tax),paid=round(body.paid===undefined?total:num(body.paid)),remaining=round(Math.max(0,total-paid)),createdAt=body.createdAt||nowIso();
+    const inv=rows(await c.query(`INSERT INTO invoices(invoice_no,type,customer_id,customer_name,payment_type,subtotal,discount,tax,total,paid,remaining,notes,status,invoice_date,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14) RETURNING *`,[invoiceNo,type,body.customerId?Number(body.customerId):null,str(body.customerName,"عميل نقدي")||"عميل نقدي",str(body.paymentType,"نقدي")||"نقدي",subtotal,discount,tax,total,paid,remaining,str(body.notes),remaining>0?"آجل":"محفوظة",createdAt]))[0];
+    for(const item of items){await c.query("INSERT INTO invoice_items(invoice_id,product_id,product_code,product_name,barcode,unit,quantity,price,discount,total) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",[inv.id,item.productId,item.productCode,item.productName,item.barcode,item.unit,item.quantity,item.price,item.discount,round(item.quantity*item.price-item.discount)]); if(item.productId) await c.query("UPDATE products SET quantity=quantity+$1 WHERE id=$2",[type==="sale"?-item.quantity:item.quantity,item.productId]);}
+    if(type==="sale"&&remaining>0&&body.customerId) await c.query("UPDATE customers SET balance=balance+$1 WHERE id=$2",[remaining,Number(body.customerId)]);
+    return inv;
   });
-  return { customer: customer as unknown as StatementData["customer"], opening, debitTotal: round(debitTotal), creditTotal: round(creditTotal), closing: round(running), transactions };
 }
+export async function deleteInvoice(id:number){await tx(async c=>{const inv=rows(await c.query("SELECT * FROM invoices WHERE id=$1 FOR UPDATE",[id]))[0];if(!inv)throw new Error("الفاتورة غير موجودة");for(const item of rows(await c.query("SELECT * FROM invoice_items WHERE invoice_id=$1",[id])))if(item.productId)await c.query("UPDATE products SET quantity=quantity+$1 WHERE id=$2",[inv.type==="sale"?num(item.quantity):-num(item.quantity),item.productId]);if(inv.type==="sale"&&inv.customerId&&num(inv.remaining)>0)await c.query("UPDATE customers SET balance=GREATEST(0,balance-$1) WHERE id=$2",[num(inv.remaining),inv.customerId]);await c.query("DELETE FROM invoices WHERE id=$1",[id]);});}
 
-export function getInstallments(): InstallmentsData {
-  const db = getLocalDb();
-  const invoices = db.prepare("SELECT * FROM invoices WHERE type = 'sale' AND paymentType = 'قسط'").all() as Row[];
-  if (invoices.length === 0) return { plans: [], overdue: [] };
-  const customerIds = Array.from(new Set(invoices.map((invoice) => Number(invoice.customerId)).filter(Boolean)));
-  const lastPayments = new Map<number, { amount: number; date: Date }>();
-  for (const payment of db.prepare("SELECT * FROM payments").all() as Row[]) {
-    const id = Number(payment.customerId);
-    if (!customerIds.includes(id)) continue;
-    const date = new Date(String(payment.paymentDate));
-    const current = lastPayments.get(id);
-    if (!current || date.getTime() > current.date.getTime()) lastPayments.set(id, { amount: num(payment.amount), date });
-  }
-  const now = Date.now();
-  const plans = customerIds.map((id) => {
-    const customer = db.prepare("SELECT * FROM customers WHERE id = ?").get(id) as Row | undefined;
-    const rows = invoices.filter((invoice) => Number(invoice.customerId) === id);
-    const totalPlan = round(rows.reduce((sum, invoice) => sum + num(invoice.total), 0));
-    const debt = round(rows.reduce((sum, invoice) => sum + Math.max(0, num(invoice.total) - num(invoice.paid)), 0));
-    const last = lastPayments.get(id);
-    const reference = last ? last.date : rows.map((invoice) => new Date(String(invoice.createdAt))).sort((a, b) => a.getTime() - b.getTime())[0] ?? new Date();
-    const daysSincePayment = Math.max(0, Math.floor((now - reference.getTime()) / 86400000));
-    return {
-      customerId: id, customerName: String(customer?.name ?? "غير معروف"), phone: String(customer?.phone ?? ""),
-      customerType: String(customer?.customerType ?? ""), totalPlan, debt, invoiceCount: rows.length,
-      lastPaymentAmount: last ? round(last.amount) : null, lastPaymentDate: last ? last.date.toISOString() : null,
-      referenceDate: reference.toISOString(), daysSincePayment, overdue: debt > 0 && daysSincePayment >= 60,
-    };
-  }).filter((plan) => plan.debt > 0.001).sort((a, b) => b.daysSincePayment - a.daysSincePayment);
-  return { plans, overdue: plans.filter((plan) => plan.overdue) };
-}
+export async function listPayments(customerId?:number){return customerId?all("SELECT * FROM payments WHERE customer_id=$1 ORDER BY payment_date DESC LIMIT 200",[customerId]):all("SELECT * FROM payments ORDER BY payment_date DESC LIMIT 200");}
+export async function insertPayment(body:Row){const customerId=Number(body.customerId),amount=num(body.amount);if(!customerId||amount<=0)throw new Error("اختر العميل وأدخل مبلغاً صحيحاً أكبر من صفر");const parsed=body.paymentDate?new Date(String(body.paymentDate)):new Date(),paymentDate=Number.isNaN(parsed.getTime())?nowIso():parsed.toISOString();return tx(async c=>{const p=rows(await c.query("INSERT INTO payments(customer_id,amount,method,note,payment_date) VALUES($1,$2,$3,$4,$5) RETURNING *",[customerId,amount,str(body.method,"نقدي")||"نقدي",str(body.note),paymentDate]))[0];await c.query("UPDATE customers SET balance=GREATEST(0,balance-$1) WHERE id=$2",[amount,customerId]);return p;});}
+export async function deletePayment(id:number){await tx(async c=>{const p=rows(await c.query("SELECT * FROM payments WHERE id=$1 FOR UPDATE",[id]))[0];if(!p)throw new Error("الدفعة غير موجودة");await c.query("DELETE FROM payments WHERE id=$1",[id]);await c.query("UPDATE customers SET balance=balance+$1 WHERE id=$2",[num(p.amount),p.customerId]);});}
 
-/* ========================= reports ========================= */
-export function getReports(): ReportsData {
-  const db = getLocalDb();
-  const invoices = db.prepare("SELECT * FROM invoices ORDER BY id DESC LIMIT 500").all() as Row[];
-  const items = db.prepare("SELECT * FROM invoiceItems").all() as Row[];
-  // نحترم حد الأصناف في النسخة التجريبية حتى تتطابق التقارير مع ما يراه المستخدم.
-  const products = listProducts() as Row[];
-  const customersCount = (db.prepare("SELECT COUNT(*) AS n FROM customers").get() as { n: number }).n;
-  const saleInvoices = invoices.filter((invoice) => invoice.type === "sale");
-  const purchaseInvoices = invoices.filter((invoice) => invoice.type === "purchase");
-  const salesTotal = round(saleInvoices.reduce((sum, invoice) => sum + num(invoice.total), 0));
-  const purchasesTotal = round(purchaseInvoices.reduce((sum, invoice) => sum + num(invoice.total), 0));
-  const saleIds = new Set(saleInvoices.map((invoice) => Number(invoice.id)));
-  const costByProduct = new Map(products.map((product) => [Number(product.id), num(product.purchasePrice)]));
-  const cost = items.filter((item) => saleIds.has(Number(item.invoiceId))).reduce((sum, item) => sum + num(item.quantity) * (costByProduct.get(Number(item.productId)) ?? 0), 0);
+type Entry={id:string;date:Date;kind:"invoice"|"payment";description:string;reference:string;debit:number;credit:number;net:number};
+export async function getStatement(customerId:number,fromText="",toText=""):Promise<StatementData>{const customer=await one("SELECT * FROM customers WHERE id=$1",[customerId]);if(!customer)throw new Error("العميل غير موجود");const from=fromText?new Date(`${fromText}T00:00:00`):null,to=toText?new Date(`${toText}T23:59:59.999`):null,validFrom=from&&!Number.isNaN(from.getTime())?from:null,validTo=to&&!Number.isNaN(to.getTime())?to:null;const entries:Entry[]=[];for(const i of await all("SELECT * FROM invoices WHERE customer_id=$1 AND type='sale'",[customerId]))entries.push({id:`invoice-${i.id}`,date:new Date(i.createdAt),kind:"invoice",description:`فاتورة مبيعات - ${i.paymentType}`,reference:String(i.invoiceNo),debit:num(i.total),credit:num(i.paid),net:num(i.total)-num(i.paid)});for(const p of await all("SELECT * FROM payments WHERE customer_id=$1",[customerId]))entries.push({id:`payment-${p.id}`,date:new Date(p.paymentDate),kind:"payment",description:`دفعة ${p.method}${p.note?` - ${p.note}`:""}`,reference:`PAY-${p.id}`,debit:0,credit:num(p.amount),net:-num(p.amount)});entries.sort((a,b)=>a.date.getTime()-b.date.getTime());const opening=round(entries.filter(e=>validFrom&&e.date<validFrom).reduce((s,e)=>s+e.net,0)),inRange=entries.filter(e=>(!validFrom||e.date>=validFrom)&&(!validTo||e.date<=validTo));let running=opening,debitTotal=0,creditTotal=0;const transactions=inRange.map(e=>{running=round(running+e.net);debitTotal+=e.debit;creditTotal+=e.credit;return{id:e.id,date:e.date.toISOString(),kind:e.kind,description:e.description,reference:e.reference,debit:round(e.debit),credit:round(e.credit),balance:running};});return{customer:customer as unknown as StatementData["customer"],opening,debitTotal:round(debitTotal),creditTotal:round(creditTotal),closing:round(running),transactions};}
+export async function getInstallments():Promise<InstallmentsData>{const invoices=await all("SELECT * FROM invoices WHERE type='sale' AND payment_type='قسط'");if(!invoices.length)return{plans:[],overdue:[]};const ids=[...new Set(invoices.map(i=>Number(i.customerId)).filter(Boolean))],payments=await all("SELECT * FROM payments"),last=new Map<number,{amount:number;date:Date}>();for(const p of payments){const id=Number(p.customerId);if(!ids.includes(id))continue;const date=new Date(p.paymentDate),prev=last.get(id);if(!prev||date>prev.date)last.set(id,{amount:num(p.amount),date});}const now=Date.now(),plans=[] as any[];for(const id of ids){const customer=await one("SELECT * FROM customers WHERE id=$1",[id]),rs=invoices.filter(i=>Number(i.customerId)===id),totalPlan=round(rs.reduce((s,i)=>s+num(i.total),0)),debt=round(rs.reduce((s,i)=>s+Math.max(0,num(i.total)-num(i.paid)),0)),lp=last.get(id),reference=lp?.date??rs.map(i=>new Date(i.createdAt)).sort((a,b)=>a.getTime()-b.getTime())[0]??new Date(),daysSincePayment=Math.max(0,Math.floor((now-reference.getTime())/86400000));if(debt>.001)plans.push({customerId:id,customerName:String(customer?.name??"غير معروف"),phone:String(customer?.phone??""),customerType:String(customer?.customerType??""),totalPlan,debt,invoiceCount:rs.length,lastPaymentAmount:lp?round(lp.amount):null,lastPaymentDate:lp?.date.toISOString()??null,referenceDate:reference.toISOString(),daysSincePayment,overdue:daysSincePayment>=60});}plans.sort((a,b)=>b.daysSincePayment-a.daysSincePayment);return{plans,overdue:plans.filter(p=>p.overdue)};}
 
-  const dayMap = new Map<string, number>();
-  const today = new Date();
-  for (let offset = 6; offset >= 0; offset--) {
-    const day = new Date(today); day.setDate(today.getDate() - offset);
-    dayMap.set(day.toISOString().slice(0, 10), 0);
-  }
-  for (const invoice of saleInvoices) {
-    const key = new Date(String(invoice.createdAt)).toISOString().slice(0, 10);
-    if (dayMap.has(key)) dayMap.set(key, (dayMap.get(key) ?? 0) + num(invoice.total));
-  }
-  const daily = Array.from(dayMap.entries()).map(([key, total]) => ({
-    day: new Date(key).toLocaleDateString("ar-EG", { weekday: "short" }), total: round(total),
-  }));
+export async function getReports():Promise<ReportsData>{const [invoices,items,products,customers]=await Promise.all([all("SELECT * FROM invoices ORDER BY id DESC LIMIT 500"),all("SELECT * FROM invoice_items"),listProducts(),one("SELECT COUNT(*) AS n FROM customers")]);const sales=invoices.filter(i=>i.type==="sale"),purchases=invoices.filter(i=>i.type==="purchase"),salesTotal=round(sales.reduce((s,i)=>s+num(i.total),0)),purchasesTotal=round(purchases.reduce((s,i)=>s+num(i.total),0)),saleIds=new Set(sales.map(i=>Number(i.id))),costByProduct=new Map(products.map(p=>[Number(p.id),num(p.purchasePrice)])),cost=items.filter(i=>saleIds.has(Number(i.invoiceId))).reduce((s,i)=>s+num(i.quantity)*(costByProduct.get(Number(i.productId))??0),0);const dayMap=new Map<string,number>(),today=new Date();for(let o=6;o>=0;o--){const d=new Date(today);d.setDate(today.getDate()-o);dayMap.set(d.toISOString().slice(0,10),0);}for(const i of sales){const k=new Date(i.createdAt).toISOString().slice(0,10);if(dayMap.has(k))dayMap.set(k,(dayMap.get(k)??0)+num(i.total));}const daily=Array.from(dayMap.entries()).map(([key,total])=>({day:new Date(key).toLocaleDateString("ar-EG",{weekday:"short"}),total:round(total)}));const tops=new Map<string,{name:string;quantity:number;total:number}>();for(const i of items.filter(r=>saleIds.has(Number(r.invoiceId)))){const name=String(i.productName),x=tops.get(name)??{name,quantity:0,total:0};x.quantity+=num(i.quantity);x.total+=num(i.total);tops.set(name,x);}const topProducts=Array.from(tops.values()).sort((a,b)=>b.total-a.total).slice(0,6).map(i=>({...i,quantity:round(i.quantity),total:round(i.total)}));return{salesTotal,purchasesTotal,salesCount:sales.length,purchasesCount:purchases.length,profit:round(salesTotal-cost),productsCount:products.length,customersCount:Number(customers?.n??0),stockValue:round(products.reduce((s,p)=>s+num(p.quantity)*num(p.purchasePrice),0)),lowStock:mapRows(products.filter(p=>num(p.quantity)<=num(p.minQuantity))) as unknown as ReportsData["lowStock"],topProducts,daily,recent:invoices.slice(0,8) as unknown as ReportsData["recent"]};}
 
-  const topMap = new Map<string, { name: string; quantity: number; total: number }>();
-  for (const item of items.filter((row) => saleIds.has(Number(row.invoiceId)))) {
-    const name = String(item.productName);
-    const current = topMap.get(name) ?? { name, quantity: 0, total: 0 };
-    current.quantity += num(item.quantity); current.total += num(item.total);
-    topMap.set(name, current);
-  }
-  const topProducts = Array.from(topMap.values()).sort((a, b) => b.total - a.total).slice(0, 6)
-    .map((item) => ({ ...item, quantity: round(item.quantity), total: round(item.total) }));
-
-  return {
-    salesTotal, purchasesTotal, salesCount: saleInvoices.length, purchasesCount: purchaseInvoices.length,
-    profit: round(salesTotal - cost), productsCount: products.length, customersCount,
-    stockValue: round(products.reduce((sum, product) => sum + num(product.quantity) * num(product.purchasePrice), 0)),
-    lowStock: mapRows(products.filter((product) => num(product.quantity) <= num(product.minQuantity))).map((product) => ({ ...product, createdAt: String(product.createdAt) })) as unknown as ReportsData["lowStock"],
-    topProducts, daily, recent: invoices.slice(0, 8).map((invoice) => ({ ...invoice, invoiceDate: String(invoice.invoiceDate), createdAt: String(invoice.createdAt) })) as unknown as ReportsData["recent"],
-  };
-}
-
-/* ========================= settings & tickets ========================= */
-export function getSettings(): StoreSettings {
-  const rows = getLocalDb().prepare("SELECT key, value FROM settings").all() as Row[];
-  const result: Record<string, string> = { ...DEFAULT_SETTINGS } as unknown as Record<string, string>;
-  for (const row of rows) if (String(row.key) in result) result[String(row.key)] = String(row.value);
-  return result as unknown as StoreSettings;
-}
-
-export function updateSettings(body: Record<string, unknown>): StoreSettings {
-  const db = getLocalDb();
-  const upsert = db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
-  db.transaction(() => {
-    for (const key of Object.keys(DEFAULT_SETTINGS)) {
-      if (!(key in body)) continue;
-      upsert.run(key, str(body[key]));
-    }
-  })();
-  return getSettings();
-}
-
-export function listTickets() {
-  return getLocalDb().prepare("SELECT * FROM supportTickets ORDER BY id DESC LIMIT 50").all() as Row[];
-}
-
-export function insertTicket(body: Row) {
-  const db = getLocalDb();
-  const info = db.prepare("INSERT INTO supportTickets (name, phone, subject, message, status, createdAt) VALUES (?,?,?,?,'جديدة',?)")
-    .run(str(body.name), str(body.phone), str(body.subject), str(body.message), nowIso());
-  return db.prepare("SELECT * FROM supportTickets WHERE id = ?").get(info.lastInsertRowid) as Row;
-}
-
-/* ========================= كاميرا الموبايل / الباركود عبر الشبكة ========================= */
-export function pushScan(code: string, source = "phone", target = "pos") {
-  const db = getLocalDb();
-  const clean = String(code ?? "").trim().slice(0, 80);
-  if (!clean) throw new Error("الرمز فارغ");
-  // نمنع تكرار الرمز نفسه خلال ثانيتين (اهتزاز يد أو قراءة مزدوجة).
-  const recent = db.prepare("SELECT id FROM scanQueue WHERE code = ? AND createdAt > ? LIMIT 1")
-    .get(clean, new Date(Date.now() - 1500).toISOString());
-  if (recent) return { ok: true, duplicate: true, id: Number((recent as Row).id) };
-  const info = db.prepare("INSERT INTO scanQueue (code, source, target) VALUES (?, ?, ?)").run(clean, source, target);
-  // تنظيف تلقائي للسجلات القديمة (أكثر من 500 صف)
-  db.prepare("DELETE FROM scanQueue WHERE id < (SELECT COALESCE(MAX(id),0) - 500 FROM scanQueue)").run();
-  return { ok: true, duplicate: false, id: Number(info.lastInsertRowid) };
-}
-
-export function pollScans(target = "pos") {
-  const db = getLocalDb();
-  const rows = db.prepare("SELECT id, code, source, createdAt FROM scanQueue WHERE consumed = 0 AND target = ? ORDER BY id ASC LIMIT 20").all(target) as Row[];
-  if (rows.length) {
-    const mark = db.prepare("UPDATE scanQueue SET consumed = 1 WHERE id = ?");
-    db.transaction(() => { for (const row of rows) mark.run(row.id); })();
-  }
-  return rows.map((row) => ({ id: Number(row.id), code: String(row.code), source: String(row.source), createdAt: String(row.createdAt) }));
-}
-
-export function searchProducts(query: string) {
-  const db = getLocalDb();
-  const license = getLicense();
-  const q = `%${String(query ?? "").trim().toLowerCase()}%`;
-  const rows = (license.activated
-    ? db.prepare("SELECT * FROM products WHERE lower(name) LIKE ? OR lower(code) LIKE ? OR lower(barcode) LIKE ? ORDER BY id DESC LIMIT 12").all(q, q, q)
-    : db.prepare("SELECT * FROM (SELECT * FROM products ORDER BY id ASC LIMIT ?) p WHERE lower(p.name) LIKE ? OR lower(p.code) LIKE ? OR lower(p.barcode) LIKE ? ORDER BY p.id DESC LIMIT 12").all(license.trialProductLimit, q, q, q)) as Row[];
-  return mapRows(rows);
-}
-
-export function findProductByCode(code: string) {
-  const db = getLocalDb();
-  const value = String(code ?? "").trim();
-  const row = db.prepare("SELECT * FROM products WHERE barcode = ? OR code = ? LIMIT 1").get(value, value) as Row | undefined;
-  return row ? mapProduct(row) : null;
-}
-
-/* ========================= backup ========================= */
-export function exportBackup() {
-  const db = getLocalDb();
-  const invoices = db.prepare("SELECT * FROM invoices").all() as Row[];
-  const items = db.prepare("SELECT * FROM invoiceItems").all() as Row[];
-  return {
-    app: "الجمال للأدوات المدرسية — نسخة SQLite", version: "3.0.0", exportedAt: nowIso(),
-    products: listProducts(), customers: listCustomers(),
-    invoices: invoices.map((invoice) => ({ ...invoice, items: items.filter((item) => Number(item.invoiceId) === Number(invoice.id)) })),
-    payments: listPayments(),
-    settings: db.prepare("SELECT * FROM settings").all(),
-    tickets: listTickets(),
-  };
-}
-
-export function restoreBackup(body: Record<string, unknown>) {
-  const db = getLocalDb();
-  const rows = (key: string) => (Array.isArray(body[key]) ? body[key] as Row[] : []);
-  const products = rows("products");
-  const customers = rows("customers");
-  const settingsRows = rows("settings");
-  if (!products.length && !customers.length && !settingsRows.length) throw new Error("ملف النسخة الاحتياطية غير صالح");
-
-  const insertProductRow = db.prepare(`INSERT INTO products
-    (code, barcode, name, category, unit, purchasePrice, salePrice, quantity, minQuantity, taxRate, active, createdAt)
-    VALUES (@code,@barcode,@name,@category,@unit,@purchasePrice,@salePrice,@quantity,@minQuantity,@taxRate,@active,@createdAt)
-    ON CONFLICT(code) DO UPDATE SET barcode=excluded.barcode, name=excluded.name, category=excluded.category,
-      unit=excluded.unit, purchasePrice=excluded.purchasePrice, salePrice=excluded.salePrice,
-      quantity=excluded.quantity, minQuantity=excluded.minQuantity, taxRate=excluded.taxRate, active=excluded.active`);
-  const insertCustomerRow = db.prepare(`INSERT INTO customers (code,name,phone,address,customerType,balance,createdAt)
-    VALUES (@code,@name,@phone,@address,@customerType,@balance,@createdAt)
-    ON CONFLICT(code) DO UPDATE SET name=excluded.name, phone=excluded.phone, address=excluded.address,
-      customerType=excluded.customerType, balance=excluded.balance`);
-
-  return db.transaction(() => {
-    let productCount = 0, customerCount = 0, settingCount = 0;
-    for (const row of products) {
-      const code = str(row.code), name = str(row.name);
-      if (!code || !name) continue;
-      insertProductRow.run({
-        code, barcode: str(row.barcode), name, category: str(row.category, "عام") || "عام",
-        unit: str(row.unit, "قطعة") || "قطعة", purchasePrice: num(row.purchasePrice), salePrice: num(row.salePrice),
-        quantity: num(row.quantity), minQuantity: num(row.minQuantity), taxRate: num(row.taxRate),
-        active: row.active === false ? 0 : 1, createdAt: str(row.createdAt) || nowIso(),
-      });
-      productCount++;
-    }
-    for (const row of customers) {
-      const code = str(row.code), name = str(row.name);
-      if (!code || !name) continue;
-      insertCustomerRow.run({
-        code, name, phone: str(row.phone), address: str(row.address),
-        customerType: str(row.customerType, "عادي") || "عادي", balance: num(row.balance), createdAt: str(row.createdAt) || nowIso(),
-      });
-      customerCount++;
-    }
-    for (const row of settingsRows) {
-      const key = str(row.key);
-      if (!key) continue;
-      db.prepare("INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, str(row.value));
-      settingCount++;
-    }
-    return { products: productCount, customers: customerCount, settings: settingCount };
-  })();
-}
+export async function getSettings():Promise<StoreSettings>{const result={...DEFAULT_SETTINGS} as unknown as Record<string,string>;for(const row of await all("SELECT key,value FROM settings"))if(String(row.key) in result)result[String(row.key)]=String(row.value);return result as unknown as StoreSettings;}
+export async function updateSettings(body:Record<string,unknown>):Promise<StoreSettings>{await tx(async c=>{for(const key of Object.keys(DEFAULT_SETTINGS))if(key in body)await c.query("INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",[key,str(body[key])]);});return getSettings();}
+export async function listTickets(){return all("SELECT * FROM support_tickets ORDER BY id DESC LIMIT 50");}
+export async function insertTicket(body:Row){return rows(await (await query("INSERT INTO support_tickets(name,phone,subject,message,status) VALUES($1,$2,$3,$4,'جديدة') RETURNING *",[str(body.name),str(body.phone),str(body.subject),str(body.message)])))[0];}
+export async function pushScan(code:string,source="phone",target="pos"){const clean=String(code??"").trim().slice(0,80);if(!clean)throw new Error("الرمز فارغ");const recent=await one("SELECT id FROM scan_queue WHERE code=$1 AND created_at>NOW()-INTERVAL '1.5 seconds' LIMIT 1",[clean]);if(recent)return{ok:true,duplicate:true,id:Number(recent.id)};const inserted=rows(await query("INSERT INTO scan_queue(code,source,target) VALUES($1,$2,$3) RETURNING id",[clean,source,target]))[0];await query("DELETE FROM scan_queue WHERE id < (SELECT GREATEST(COALESCE(MAX(id),0)-500,0) FROM scan_queue)");return{ok:true,duplicate:false,id:Number(inserted.id)};}
+export async function pollScans(target="pos"){return tx(async c=>{const result=rows(await c.query("SELECT id,code,source,created_at FROM scan_queue WHERE consumed=FALSE AND target=$1 ORDER BY id ASC LIMIT 20 FOR UPDATE SKIP LOCKED",[target]));if(result.length)await c.query("UPDATE scan_queue SET consumed=TRUE WHERE id=ANY($1::int[])",[result.map(r=>r.id)]);return result.map(r=>({id:Number(r.id),code:String(r.code),source:String(r.source),createdAt:new Date(r.createdAt).toISOString()}));});}
+export async function searchProducts(queryText:string){const license=await getLicense(),q=`%${String(queryText??"").trim().toLowerCase()}%`;return mapRows(license.activated?await all("SELECT * FROM products WHERE lower(name) LIKE $1 OR lower(code) LIKE $1 OR lower(barcode) LIKE $1 ORDER BY id DESC LIMIT 12",[q]):await all("SELECT * FROM (SELECT * FROM products ORDER BY id ASC LIMIT $1) p WHERE lower(p.name) LIKE $2 OR lower(p.code) LIKE $2 OR lower(p.barcode) LIKE $2 ORDER BY p.id DESC LIMIT 12",[license.trialProductLimit,q]));}
+export async function findProductByCode(code:string){const value=String(code??"").trim(),row=await one("SELECT * FROM products WHERE barcode=$1 OR code=$1 LIMIT 1",[value]);return row?mapProduct(row):null;}
+export async function exportBackup(){const [invoices,items,products,customers,payments,settings,tickets]=await Promise.all([all("SELECT * FROM invoices"),all("SELECT * FROM invoice_items"),listProducts(),listCustomers(),listPayments(),all("SELECT * FROM settings"),listTickets()]);return{app:"Cashgo — نسخة Neon",version:"3.0.0",exportedAt:nowIso(),products,customers,invoices:invoices.map(i=>({...i,items:items.filter(x=>Number(x.invoiceId)===Number(i.id))})),payments,settings,tickets};}
+export async function restoreBackup(body:Record<string,unknown>){const rowsOf=(key:string)=>Array.isArray(body[key])?body[key] as Row[]:[],products=rowsOf("products"),customers=rowsOf("customers"),settings=rowsOf("settings");if(!products.length&&!customers.length&&!settings.length)throw new Error("ملف النسخة الاحتياطية غير صالح");return tx(async c=>{let pc=0,cc=0,sc=0;for(const p of products){const code=str(p.code),name=str(p.name);if(!code||!name)continue;await c.query(`INSERT INTO products(code,barcode,name,category,unit,purchase_price,sale_price,quantity,min_quantity,tax_rate,active) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(code) DO UPDATE SET barcode=EXCLUDED.barcode,name=EXCLUDED.name,category=EXCLUDED.category,unit=EXCLUDED.unit,purchase_price=EXCLUDED.purchase_price,sale_price=EXCLUDED.sale_price,quantity=EXCLUDED.quantity,min_quantity=EXCLUDED.min_quantity,tax_rate=EXCLUDED.tax_rate,active=EXCLUDED.active`,[code,str(p.barcode),name,str(p.category,"عام")||"عام",str(p.unit,"قطعة")||"قطعة",num(p.purchasePrice),num(p.salePrice),num(p.quantity),num(p.minQuantity),num(p.taxRate),p.active!==false]);pc++;}for(const p of customers){const code=str(p.code),name=str(p.name);if(!code||!name)continue;await c.query(`INSERT INTO customers(code,name,phone,address,customer_type,balance) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(code) DO UPDATE SET name=EXCLUDED.name,phone=EXCLUDED.phone,address=EXCLUDED.address,customer_type=EXCLUDED.customer_type,balance=EXCLUDED.balance`,[code,name,str(p.phone),str(p.address),str(p.customerType,"عادي")||"عادي",num(p.balance)]);cc++;}for(const s of settings){const key=str(s.key);if(!key)continue;await c.query("INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",[key,str(s.value)]);sc++;}return{products:pc,customers:cc,settings:sc};});}

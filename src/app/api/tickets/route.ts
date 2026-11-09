@@ -4,7 +4,7 @@ import { badRequest, errorResponse, readJson } from "@/lib/api-response";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  try { return Response.json({ tickets: listTickets() }); }
+  try { return Response.json({ tickets: await listTickets() }); }
   catch (error) { return errorResponse(error); }
 }
 
@@ -15,6 +15,6 @@ export async function POST(request: Request) {
     const subject = String(body.subject ?? "").trim();
     const message = String(body.message ?? "").trim();
     if (!name || !subject || !message) return badRequest("برجاء إكمال الاسم والموضوع والرسالة");
-    return Response.json({ ticket: insertTicket(body) }, { status: 201 });
+    return Response.json({ ticket: await insertTicket(body) }, { status: 201 });
   } catch (error) { return errorResponse(error); }
 }

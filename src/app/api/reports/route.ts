@@ -4,6 +4,6 @@ import { errorResponse } from "@/lib/api-response";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  try { return Response.json(getReports()); }
+  try { return Response.json(await getReports()); }
   catch (error) { return errorResponse(error); }
 }
